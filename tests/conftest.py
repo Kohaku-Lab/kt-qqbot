@@ -18,12 +18,26 @@ from kt_qqbot.auth.credentials import Credentials
 from kt_qqbot.hub import QQHub
 from kt_qqbot.store import ChatStore
 
+from tests import safety
+
 APP_ID = "102000001"
 SECRET = "s3cret-value"
 
 
 @pytest.fixture(autouse=True)
-def isolated_config(tmp_path, monkeypatch):
+def safety_guard(request, tmp_path, monkeypatch):
+    """No real provider, credential file or network in any test (see tests/safety.py)."""
+    live = request.node.get_closest_marker("live") and os.environ.get("KT_QQBOT_LIVE")
+    if live:
+        yield
+        return
+    safety.install(monkeypatch, tmp_path)
+    yield
+    safety.uninstall()
+
+
+@pytest.fixture(autouse=True)
+def isolated_config(safety_guard, tmp_path, monkeypatch):
     """KT config dir under tmp, no QQ env credentials, empty hub registry."""
     monkeypatch.setenv("KT_CONFIG_DIR", str(tmp_path / "ktconfig"))
     monkeypatch.delenv("QQBOT_APPID", raising=False)
@@ -43,7 +57,7 @@ class FakeOpenAPI:
         self.token_calls = 0
         self.fail_send: str | None = None
         self.fail_upload: str | None = None
-        self.reject_active = False
+        self.fail_codes: list[int] = []
         self._ids = count(1)
 
     def sent(self, suffix: str = "/messages") -> list[dict]:
@@ -71,13 +85,14 @@ class FakeOpenAPI:
                 )
             return httpx.Response(200, json={"file_info": "FILEINFO", "ttl": 3600})
         if path.endswith("/messages"):
+            if self.fail_codes:
+                code = self.fail_codes.pop(0)
+                return httpx.Response(
+                    400, json={"code": code, "message": f"err {code}"}
+                )
             if self.fail_send:
                 return httpx.Response(
-                    400, json={"code": 40054005, "message": self.fail_send}
-                )
-            if self.reject_active and not body.get("msg_id"):
-                return httpx.Response(
-                    400, json={"code": 22009, "message": "active msg limit"}
+                    400, json={"code": 304003, "message": self.fail_send}
                 )
             return httpx.Response(
                 200, json={"id": f"OUT{next(self._ids)}", "timestamp": "now"}
