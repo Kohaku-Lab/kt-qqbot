@@ -1,5 +1,6 @@
 """Hub ingest/send, the qq_feed trigger, and the qq_send / qq_history tools."""
 
+import asyncio
 import time
 from types import SimpleNamespace
 
@@ -378,3 +379,52 @@ async def test_reply_ledger_survives_hub_restart(make_hub, fake_api, tmp_path):
     assert not hub.ledger.usable("group:G3", "group")
     assert hub.store.slots() == {}, "expired slots are dropped from the vault"
     await hub.close()
+
+
+class _BusyAgent:
+    """Host agent stand-in: reports a running turn and records injections."""
+
+    def __init__(self, busy=True):
+        self.is_processing = busy
+        self.injected = []
+
+    async def inject_event(self, event):
+        self.injected.append(event)
+        return False
+
+
+class TestMidTurn:
+    async def test_chat_arriving_mid_turn_folds_into_the_running_turn(self, make_hub):
+        hub = make_hub()
+        agent = _BusyAgent()
+        feed = QQFeedTrigger(batch_delay=0, wake="mention")
+        feed.bind_host("qq-c1", "qq", agent)
+        await feed.attach(hub)
+        await feed.start()
+        await hub.on_dispatch(EVENT_GROUP_AT, group_event("M3", "G", "P", "m3 hey bot"))
+        assert "m3 hey bot" in (await _next(feed)).content
+        await hub.on_dispatch(EVENT_GROUP, group_event("M4", "G", "P", "m4 also this"))
+        for _ in range(50):
+            if agent.injected:
+                break
+            await asyncio.sleep(0.02)
+        assert agent.injected, "m4 must reach the running turn"
+        assert "m4 also this" in agent.injected[0].content
+        assert agent.injected[0].stackable
+        assert await _next(feed, tries=2) is None, "m4 is not delivered twice"
+        await feed.stop()
+        await hub.close()
+
+    async def test_idle_agent_gets_no_injection(self, make_hub):
+        hub = make_hub()
+        agent = _BusyAgent(busy=False)
+        feed = QQFeedTrigger(batch_delay=0, wake="all")
+        feed.bind_host("qq-c2", "qq", agent)
+        await feed.attach(hub)
+        await feed.start()
+        await hub.on_dispatch(EVENT_GROUP, group_event("M1", "G", "P", "hello"))
+        await asyncio.sleep(0.2)
+        assert agent.injected == []
+        assert "hello" in (await _next(feed)).content
+        await feed.stop()
+        await hub.close()

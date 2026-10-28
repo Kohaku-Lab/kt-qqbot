@@ -98,6 +98,7 @@ class QQFeedTrigger(BaseTrigger):
         max_delivery: int = 100,
         unseen_history: str = "backfill",
         debug_raw_events: int = 0,
+        mid_turn: bool = True,
     ):
         super().__init__(
             prompt=prompt,
@@ -118,6 +119,7 @@ class QQFeedTrigger(BaseTrigger):
             max_delivery=max_delivery,
             unseen_history=unseen_history,
             debug_raw_events=debug_raw_events,
+            mid_turn=mid_turn,
         )
         self.bot = bot
         self.conversations = conversations
@@ -128,6 +130,7 @@ class QQFeedTrigger(BaseTrigger):
             cooldown=float(cooldown),
         )
         self.batch_delay = float(batch_delay)
+        self.mid_turn = bool(mid_turn)
         self.backfill = int(backfill)
         self.hold = bool(hold)
         self.typing = bool(typing)
@@ -149,6 +152,8 @@ class QQFeedTrigger(BaseTrigger):
         self._summaries: dict[str, _Pending] = {}
         self._last_ambient: dict[str, float] = {}
         self._wakeup = asyncio.Event()
+        self._fold_wakeup = asyncio.Event()
+        self._fold_task: asyncio.Task | None = None
         self._http: httpx.AsyncClient | None = None
         self._owns_hub = False
         self._started = time.time()
@@ -199,6 +204,7 @@ class QQFeedTrigger(BaseTrigger):
         if not self.subscriber:
             self.subscriber = self._default_subscriber()
         hub.subscribe(self._wakeup)
+        hub.subscribe(self._fold_wakeup)
         hub.add_listener(self._on_hub_change)
         self._scan()
 
@@ -242,15 +248,38 @@ class QQFeedTrigger(BaseTrigger):
         if self.debug_raw_events:
             self.hub.capture_raw(self.debug_raw_events)
         self._http = httpx.AsyncClient()
+        if self.mid_turn:
+            self._fold_task = asyncio.create_task(self._fold_loop())
+
+    async def _fold_loop(self) -> None:
+        """While the host agent is in a turn, fold newly arrived chat into it."""
+        while self._running:
+            await self._fold_wakeup.wait()
+            self._fold_wakeup.clear()
+            agent = self.host_agent
+            if self.hub is None or agent is None or not agent.is_processing:
+                continue
+            if self.batch_delay > 0:
+                await asyncio.sleep(self.batch_delay)
+            if self.hub is None or not agent.is_processing:
+                continue
+            cids = [cid for cid, summary in self._summaries.items() if summary.count]
+            event = await self.compose(cids) if cids else None
+            if event is not None:
+                await agent.inject_event(event)
 
     async def _on_stop(self) -> None:
         hub, self.hub = self.hub, None
         if hub is not None:
             hub.unsubscribe(self._wakeup)
+            hub.unsubscribe(self._fold_wakeup)
             hub.remove_listener(self._on_hub_change)
             if self._owns_hub:
                 await hub_registry.release(hub)
                 self._owns_hub = False
+        fold, self._fold_task = self._fold_task, None
+        if fold is not None:
+            fold.cancel()
         for task in list(self._tasks):
             task.cancel()
         http, self._http = self._http, None
