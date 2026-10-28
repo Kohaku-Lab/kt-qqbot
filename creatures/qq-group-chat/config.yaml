@@ -46,8 +46,32 @@ tools:
     type: package
     module: kt_qqbot.tools
     class: QQHistoryTool
+  - name: qq_sticker
+    type: package
+    module: kt_qqbot.media_tools
+    class: QQStickerTool
+  - name: qq_image_search
+    type: package
+    module: kt_qqbot.media_tools
+    class: QQImageSearchTool
+  # Read-only web access. qq_web_guard (below) refuses fetches to private or
+  # local addresses, because QQ users can steer this creature.
+  - name: web_search
+    type: builtin
+  - name: web_fetch
+    type: builtin
 
 plugins:
+  # Under kt serve a dashboard-started creature is privileged and gets graph
+  # (group_*) and Drive (drive_*) tools; QQ users must not reach them.
+  - name: qq_guard
+    type: package
+    module: kt_qqbot.plugins.guard
+    class: QQGuardPlugin
+  - name: qq_web_guard
+    type: package
+    module: kt_qqbot.plugins.web_guard
+    class: QQWebGuardPlugin
   - name: qq_character
     type: package
     module: kt_qqbot.plugins.character

@@ -30,6 +30,12 @@ tools:
   - name: qq_watch
     module: kt_qqbot.tools
     class: QQWatchTool
+  - name: qq_sticker
+    module: kt_qqbot.media_tools
+    class: QQStickerTool
+  - name: qq_image_search
+    module: kt_qqbot.media_tools
+    class: QQImageSearchTool
 
 plugins:
   - name: qq_character
@@ -41,6 +47,12 @@ plugins:
   - name: qq_status
     module: kt_qqbot.plugins.status
     class: QQStatusPlugin
+  - name: qq_web_guard
+    module: kt_qqbot.plugins.web_guard
+    class: QQWebGuardPlugin
+  - name: qq_guard
+    module: kt_qqbot.plugins.guard
+    class: QQGuardPlugin
 
 ui:
   sdk: ">=1,<2"
