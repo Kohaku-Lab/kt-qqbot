@@ -1,0 +1,69 @@
+name: kt-qqbot
+version: 0.1.0
+description: >-
+  QQ bot for KohakuTerrarium: a qq_feed trigger that delivers QQ private and
+  group chat as incremental updates, and qq_send / qq_history tools the
+  creature uses to speak. Silence is the default.
+python_dependencies:
+  - httpx>=0.27
+  - websockets>=13
+  - cryptography>=42
+  - qrcode>=7.4
+  - kohakuvault>=1.1.0,<2
+
+creatures:
+  - name: qq-group-chat
+  - name: qq-router
+
+triggers:
+  - name: qq_feed
+    module: kt_qqbot.trigger
+    class: QQFeedTrigger
+
+tools:
+  - name: qq_send
+    module: kt_qqbot.tools
+    class: QQSendTool
+  - name: qq_history
+    module: kt_qqbot.tools
+    class: QQHistoryTool
+  - name: qq_watch
+    module: kt_qqbot.tools
+    class: QQWatchTool
+
+plugins:
+  - name: qq_character
+    module: kt_qqbot.plugins.character
+    class: QQCharacterPlugin
+  - name: qq_router
+    module: kt_qqbot.plugins.router
+    class: QQRouterPlugin
+  - name: qq_status
+    module: kt_qqbot.plugins.status
+    class: QQStatusPlugin
+
+ui:
+  sdk: ">=1,<2"
+  root: ui
+  entry: ui/index.js
+  styles: [ui/style.css]
+  i18n:
+    en: ui/i18n/en.json
+  handler: kt_qqbot.ui_owner:QQBotUI
+  contributes:
+    - kind: settings
+      id: qqbot
+      label: "QQ Bot"
+      owner: package
+      icon: i-carbon-chat
+      description: Bind a QQ bot by QR code or by AppID / AppSecret.
+    - kind: panel
+      id: chats
+      label: "QQ chats"
+      owner: plugin:qq_status
+      icon: i-carbon-chat
+      description: Chats, last messages and reply slots of the focused creature.
+    - kind: tool-renderer
+      id: qq-send
+      label: "QQ message"
+      owner: tool:qq_send
