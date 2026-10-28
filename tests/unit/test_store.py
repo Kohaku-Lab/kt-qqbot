@@ -77,6 +77,23 @@ class TestChatStore:
         assert store.alias("group:G", "AAAA1111") == "Kohaku"
         store.close()
 
+    def test_member_mention_tags_become_readable_names(self, tmp_path):
+        store = ChatStore(tmp_path / "s.kvault")
+        store.append(_msg("group:G", "m1", author="4BF99D7A", name="Kohaku"))
+        seq = store.append(
+            _msg(
+                "group:G",
+                "m2",
+                content="<@4BF99D7A> look, and <@!77EE0011> too",
+                author="A1B2C3D4",
+            )
+        )
+        stored = store.get("group:G", seq)
+        assert stored["content"] == "@Kohaku look, and @#77ee too"
+        assert "<@" not in stored["content"]
+        assert store.alias("group:G", "77EE0011") == "#77ee"
+        store.close()
+
     def test_cursor_never_moves_back_and_prefixes_do_not_collide(self, tmp_path):
         store = ChatStore(tmp_path / "s.kvault")
         store.set_cursor("a", "group:G", 5)
@@ -132,9 +149,9 @@ class TestLedger:
         ledger.note_inbound("group:G", "old")
         now[0] = 10
         ledger.note_inbound("group:G", "new")
-        tickets = [ledger.take("group:G", "group") for _ in range(5)]
-        assert tickets[:4] == [ReplyTicket("new", i) for i in (1, 2, 3, 4)]
-        assert tickets[4] == ReplyTicket("old", 1)
+        tickets = [ledger.take("group:G", "group") for _ in range(6)]
+        assert tickets[:5] == [ReplyTicket("new", i) for i in (1, 2, 3, 4, 5)]
+        assert tickets[5] == ReplyTicket("old", 1)
         now[0] = 10 + 300
         assert ledger.take("group:G", "group") is None
         assert not ledger.usable("group:G", "group")
@@ -143,10 +160,10 @@ class TestLedger:
         now = [0.0]
         ledger = ReplyLedger(clock=lambda: now[0])
         ledger.note_inbound("c2c:U", "m")
-        now[0] = 29 * 60
+        now[0] = 59 * 60
         assert ledger.usable("c2c:U", "c2c")
         assert ledger.take("c2c:U", "c2c") == ReplyTicket("m", 1)
-        now[0] = 30 * 60
+        now[0] = 60 * 60
         assert ledger.take("c2c:U", "c2c") is None
         assert ledger.take("c2c:other", "c2c") is None
 
@@ -187,7 +204,7 @@ class TestRender:
         line = render_line(dict(base, seq=43), quoted)
         assert '↩m40 you "' in line and "…" in line
         image = dict(base, attachments=[{"content_type": "image/jpeg"}])
-        assert render_line(image).endswith("[image]")
+        assert render_line(image).endswith("[image m41.1]")
         mine = dict(base, self=True, seq=44)
         assert "m44 [you]:" in render_line(mine)
         block = render_block("qq_update", {"chat": "g_1", "type": "group"}, ["x"])

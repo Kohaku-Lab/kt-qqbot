@@ -3,16 +3,19 @@
 When a conversation's first message arrives (and for every stored
 conversation at start), the router adds a creature built from
 ``template`` to the live engine. Its ``qq_feed`` trigger is narrowed to
-that one conversation, and the creature id is stable, so the engine's
-session store resumes it.
+that one conversation. The creature id is stable, so when its autosession
+file already exists the router adopts that session instead, which brings
+back its conversation.
 """
 
 import asyncio
 import weakref
+from pathlib import Path
 from typing import Any
 
 from kohakuterrarium.core.config import load_agent_config
 from kohakuterrarium.modules.plugin.base import BasePlugin, PluginContext
+from kohakuterrarium.terrarium.autosession import default_session_dir
 from kohakuterrarium.terrarium.channels import TERRARIUM_ENGINE_KEY
 from kohakuterrarium.utils.logging import get_logger
 
@@ -51,11 +54,13 @@ class QQRouterPlugin(BasePlugin):
         template: str = "@kt-qqbot/creatures/qq-group-chat",
         bot: str | None = None,
         conversations: str = "all",
+        pwd: str | None = None,
     ):
         super().__init__()
         self.template = template
         self.bot = bot
         self.conversations = conversations
+        self.pwd = pwd
         self.spawned: dict[str, str] = {}
         self._ctx: PluginContext | None = None
         self._hub: QQHub | None = None
@@ -148,8 +153,14 @@ class QQRouterPlugin(BasePlugin):
             return creature_id
         self._spawning.add(creature_id)
         try:
-            config = self.build_config(cid, creature_id)
-            await engine.add_creature(config, creature_id=creature_id)
+            saved = default_session_dir(engine) / f"{creature_id}.kohakutr"
+            if saved.exists():
+                await engine.adopt_session(str(saved), pwd=self.pwd)
+            else:
+                config = self.build_config(cid, creature_id)
+                await engine.add_creature(
+                    config, creature_id=creature_id, pwd=self.pwd or str(Path.cwd())
+                )
         except Exception as exc:
             logger.error(
                 "qq_router could not add creature",

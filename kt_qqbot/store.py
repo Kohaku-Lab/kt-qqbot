@@ -9,10 +9,14 @@ operations.
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from kohakuvault import KVault
 
+from kt_qqbot.records import MENTION_TAG
+
 DEFAULT_RETENTION = 2000
+DEFAULT_MAX_ALIASES = 1000
 HANDLE_PREFIX = {"c2c": "u_", "group": "g_"}
 
 
@@ -27,10 +31,17 @@ def _cursor_prefix(subscriber: str) -> str:
 class ChatStore:
     """Message log, conversation index, aliases and cursors of one bot."""
 
-    def __init__(self, path: Path | str, *, retention: int = DEFAULT_RETENTION):
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        retention: int = DEFAULT_RETENTION,
+        max_aliases: int = DEFAULT_MAX_ALIASES,
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.retention = max(int(retention), 1)
+        self.max_aliases = max(int(max_aliases), 1)
         self._vault = KVault(str(self.path))
         self._vault.enable_auto_pack()
         self._lock = threading.RLock()
@@ -52,8 +63,10 @@ class ChatStore:
             "kind": kind,
             "handle": handle,
             "first_seen": time.time(),
+            "last_seen": time.time(),
             "head": 0,
             "low": 1,
+            "alias_count": 0,
         }
         self._vault[f"conv:{cid}"] = meta
         self._vault[f"handle:{handle}"] = cid
@@ -115,7 +128,11 @@ class ChatStore:
                 stored["alias"] = self.alias(
                     cid, record["author"], record.get("name", "")
                 )
-            meta = dict(meta, head=seq)
+            if stored.get("content"):
+                stored["content"] = MENTION_TAG.sub(
+                    lambda m: "@" + self.alias(cid, m.group(1)), stored["content"]
+                )
+            meta = dict(self.conv_meta(cid) or meta, head=seq, last_seen=time.time())
             batch: list[tuple[str, object]] = [(_seq_key(cid, seq), stored)]
             if msg_id:
                 batch.append((f"mid:{msg_id}", [cid, seq]))
@@ -189,24 +206,64 @@ class ChatStore:
     # ── aliases ────────────────────────────────────────────────────
 
     def alias(self, cid: str, author: str, name: str = "") -> str:
-        """Return a stable display alias for one sender in one conversation."""
+        """Return a stable display alias for one sender in one conversation.
+
+        At most ``max_aliases`` per chat are stored; later senders get a
+        computed short id that is not stored.
+        """
         key = f"alias:{cid}:{author}"
         current = self._vault.get(key)
+        if current is None and not self._alias_room(cid):
+            return name or "#" + self._clean(author)[:6]
         if name:
             if current != name:
-                self._vault[key] = name
+                self._store_alias(cid, key, name, new=current is None)
             return name
         if current:
             return current
-        clean = "".join(ch for ch in author.lower() if ch.isalnum()) or "0"
+        clean = self._clean(author)
         taken = {v for _, v in self._vault.items(prefix=f"alias:{cid}:")}
         size = 4
         alias = "#" + clean[:size]
         while alias in taken and size < len(clean):
             size += 2
             alias = "#" + clean[:size]
-        self._vault[key] = alias
+        self._store_alias(cid, key, alias, new=True)
         return alias
+
+    def members(self, cid: str) -> dict[str, str]:
+        """Map each display alias in ``cid`` to its sender id; shared aliases are left out."""
+        prefix = f"alias:{cid}:"
+        owners: dict[str, list[str]] = {}
+        for key, alias in self._vault.items(prefix=prefix):
+            owners.setdefault(alias, []).append(key.decode()[len(prefix) :])
+        return {alias: ids[0] for alias, ids in owners.items() if len(ids) == 1}
+
+    @staticmethod
+    def _clean(author: str) -> str:
+        return "".join(ch for ch in author.lower() if ch.isalnum()) or "0"
+
+    def _alias_room(self, cid: str) -> bool:
+        meta = self.conv_meta(cid)
+        return meta is None or int(meta.get("alias_count", 0)) < self.max_aliases
+
+    def _store_alias(self, cid: str, key: str, alias: str, *, new: bool) -> None:
+        self._vault[key] = alias
+        meta = self.conv_meta(cid)
+        if new and meta is not None:
+            meta["alias_count"] = int(meta.get("alias_count", 0)) + 1
+            self._vault[f"conv:{cid}"] = meta
+
+    # ── bot-wide state ─────────────────────────────────────────────
+
+    def get_state(self, name: str, default: Any = None) -> Any:
+        """Return one bot-wide value (gateway session, bot identity …)."""
+        value = self._vault.get(f"state:{name}")
+        return default if value is None else value
+
+    def set_state(self, name: str, value: Any) -> None:
+        """Store one bot-wide value."""
+        self._vault[f"state:{name}"] = value
 
     # ── passive-reply slots ────────────────────────────────────────
 

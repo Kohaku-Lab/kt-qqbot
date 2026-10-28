@@ -97,6 +97,7 @@ class QQFeedTrigger(BaseTrigger):
         subscriber: str | None = None,
         max_delivery: int = 100,
         unseen_history: str = "backfill",
+        debug_raw_events: int = 0,
     ):
         super().__init__(
             prompt=prompt,
@@ -116,6 +117,7 @@ class QQFeedTrigger(BaseTrigger):
             subscriber=subscriber,
             max_delivery=max_delivery,
             unseen_history=unseen_history,
+            debug_raw_events=debug_raw_events,
         )
         self.bot = bot
         self.conversations = conversations
@@ -139,6 +141,7 @@ class QQFeedTrigger(BaseTrigger):
         self.subscriber = subscriber
         self._explicit_subscriber = bool(subscriber)
         self.max_delivery = max(int(max_delivery), 1)
+        self.debug_raw_events = max(int(debug_raw_events), 0)
         self.unseen_history = unseen_history
         self.hub: QQHub | None = None
         self.last_delivered: list[str] = []
@@ -236,6 +239,8 @@ class QQFeedTrigger(BaseTrigger):
             self._owns_hub = True
             self._prepare()
         self._started = time.time()
+        if self.debug_raw_events:
+            self.hub.capture_raw(self.debug_raw_events)
         self._http = httpx.AsyncClient()
 
     async def _on_stop(self) -> None:
@@ -396,7 +401,9 @@ class QQFeedTrigger(BaseTrigger):
         self.last_delivered = delivered
         images = []
         if self._http is not None:
-            images = await images_for(self._http, shown, self.image_options)
+            images = await images_for(
+                self._http, shown, self.image_options, cache_app=hub.app_id
+            )
         return TriggerEvent(
             type="user_input",
             content=combine("\n\n".join(blocks), images),

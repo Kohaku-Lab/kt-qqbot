@@ -60,6 +60,9 @@ class Gateway:
         self._backoff = backoff
         self._on_ready = on_ready
         self.session_id: str | None = None
+        self.bot_user: dict = {}
+        self.on_session: Callable[[bool], None] | None = None
+        self.on_identity: Callable[[dict], None] | None = None
         self.seq: int | None = None
         self.ready = asyncio.Event()
         self.on_state: Callable[[str], None] | None = None
@@ -78,6 +81,14 @@ class Gateway:
         self._state = value
         if changed and self.on_state is not None:
             self.on_state(value)
+
+    def _reset_session(self) -> None:
+        self.session_id, self.seq = None, None
+        self._session_changed(force=True)
+
+    def _session_changed(self, *, force: bool) -> None:
+        if self.on_session is not None:
+            self.on_session(force)
 
     def stop(self) -> None:
         """Ask the run loop to end after the current connection."""
@@ -102,7 +113,7 @@ class Gateway:
                     self.state = "fatal"
                     raise GatewayFatal(code, reason) from exc
                 if code in SESSION_RESET_CODES:
-                    self.session_id, self.seq = None, None
+                    self._reset_session()
                 if code == CLOSE_INVALID_TOKEN:
                     self.api.tokens.invalidate()
                 if code == CLOSE_RATE_LIMITED:
@@ -190,18 +201,23 @@ class Gateway:
             await ws.close()
             return
         if op == OP_INVALID_SESSION:
-            self.session_id, self.seq = None, None
+            self._reset_session()
             await ws.close()
             return
         if op != OP_DISPATCH:
             return
         if frame.get("s") is not None:
             self.seq = int(frame["s"])
+            self._session_changed(force=False)
         kind = frame.get("t") or ""
         data = frame.get("d") or {}
         match kind:
             case "READY":
                 self.session_id = data.get("session_id")
+                self.bot_user = dict(data.get("user") or {})
+                self._session_changed(force=True)
+                if self.on_identity is not None:
+                    self.on_identity(dict(self.bot_user))
                 await self._mark_ready()
             case "RESUMED":
                 await self._mark_ready()

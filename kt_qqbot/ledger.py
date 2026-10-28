@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kt_qqbot.store import ChatStore
 
-MAX_REPLIES_PER_MSG = 4
-WINDOW_S = {"group": 5 * 60, "c2c": 30 * 60}
+MAX_REPLIES = {"group": 5, "c2c": 4}
+WINDOW_S = {"group": 300, "c2c": 3600}
 KEEP_PER_CONV = 20
 
 
@@ -40,13 +40,13 @@ class ReplyLedger:
     def __init__(
         self,
         *,
-        max_replies: int = MAX_REPLIES_PER_MSG,
+        max_replies: dict[str, int] | None = None,
         windows: dict[str, float] | None = None,
         clock: Callable[[], float] = time.time,
         store: "ChatStore | None" = None,
     ):
-        self.max_replies = max_replies
-        self.windows = dict(WINDOW_S if windows is None else windows)
+        self.max_replies = {**MAX_REPLIES, **(max_replies or {})}
+        self.windows = {**WINDOW_S, **(windows or {})}
         self._clock = clock
         self._store = store
         self._slots: dict[str, deque[_Slot]] = {}
@@ -56,6 +56,10 @@ class ReplyLedger:
     def _window(self, cid: str) -> float:
         kind = cid.partition(":")[0]
         return self.windows.get(kind, WINDOW_S["group"])
+
+    def limit(self, kind: str) -> int:
+        """Return how many replies one inbound message of ``kind`` allows."""
+        return self.max_replies.get(kind, MAX_REPLIES["group"])
 
     def _load(self) -> None:
         stored = sorted(
@@ -105,26 +109,37 @@ class ReplyLedger:
             self._drop(slots.popleft())
         self.prune()
 
-    def take(self, cid: str, kind: str) -> ReplyTicket | None:
-        """Reserve one reply on the newest usable message; None means active send."""
+    def take(self, cid: str, kind: str, *, reserve: int = 0) -> ReplyTicket | None:
+        """Reserve one reply on the newest usable message; None when the window is closed.
+
+        ``reserve`` keeps that many replies of the slot free for later sends.
+        """
         window = self.windows.get(kind, WINDOW_S["group"])
+        limit = self.limit(kind) - reserve
         now = self._clock()
         for slot in reversed(self._slots.get(cid, ())):
             if now - slot.received_at >= window:
                 break
-            if slot.uses < self.max_replies:
+            if slot.uses < limit:
                 slot.uses += 1
                 self._save(cid, slot)
                 return ReplyTicket(slot.msg_id, slot.uses)
         self.prune()
         return None
 
+    def exhaust(self, cid: str, kind: str, msg_id: str) -> None:
+        """Mark a slot used up (QQ said its window or budget is gone)."""
+        for slot in self._slots.get(cid, ()):
+            if slot.msg_id == msg_id:
+                slot.uses = self.limit(kind)
+                self._save(cid, slot)
+
     def usable(self, cid: str, kind: str) -> bool:
         """Return whether a passive reply is possible right now."""
         window = self.windows.get(kind, WINDOW_S["group"])
         now = self._clock()
         return any(
-            now - s.received_at < window and s.uses < self.max_replies
+            now - s.received_at < window and s.uses < self.limit(kind)
             for s in self._slots.get(cid, ())
         )
 
@@ -132,8 +147,9 @@ class ReplyLedger:
         """Return how many passive replies the conversation can still send now."""
         window = self.windows.get(kind, WINDOW_S["group"])
         now = self._clock()
+        limit = self.limit(kind)
         return sum(
-            self.max_replies - s.uses
+            limit - s.uses
             for s in self._slots.get(cid, ())
-            if now - s.received_at < window and s.uses < self.max_replies
+            if now - s.received_at < window and s.uses < limit
         )
