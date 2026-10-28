@@ -4,7 +4,14 @@ import { expect, test } from "vitest"
 import { createMockHost } from "@kohakuterrarium/ui-sdk"
 
 import en from "../i18n/en.json"
-import register, { ChatsPanel, SendRenderer, SettingsSection, mediaList, qrPath } from "../index.js"
+import register, {
+  ChatsPanel,
+  SendRenderer,
+  SettingsSection,
+  mediaLabel,
+  mediaList,
+  qrPath,
+} from "../index.js"
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
@@ -37,7 +44,7 @@ test("settings: bots, QR pushes, cancel, then done", async () => {
     messages: { en },
     owner: {
       state: bindState({ phase: "idle" }, [
-        { app_id: "101", default: true, source: "file", gateway: "ready" },
+        { app_id: "101", name: "kohaku-bot", default: true, source: "file", gateway: "ready" },
       ]),
       actions,
     },
@@ -45,6 +52,7 @@ test("settings: bots, QR pushes, cancel, then done", async () => {
   const wrapper = mount(SettingsSection)
   expect(wrapper.findAll("[data-test=bot]")).toHaveLength(1)
   expect(wrapper.text()).toContain("Gateway: ready")
+  expect(wrapper.find("[data-test=bot-name]").text()).toBe("kohaku-bot")
   expect(wrapper.find("[data-test=qr]").exists()).toBe(false)
   await wrapper.find("[data-test=test]").trigger("click")
   await flush()
@@ -207,5 +215,24 @@ test("renderer: sent, not sent, partly sent, media", () => {
   })
   expect(running.find("[data-test=outcome]").text()).toBe("sending…")
   expect(mediaList("a.png")).toEqual(["a.png"])
+  expect(mediaLabel("sticker:cats/sleepy.gif")).toBe("sticker cats/sleepy.gif")
+  expect(mediaLabel("img:2")).toBe("search image 2")
+  expect(mediaLabel("m12.1")).toBe("chat media m12.1")
+  expect(mediaLabel("g_ab12/m3.2")).toBe("chat media g_ab12/m3.2")
+  expect(mediaLabel("out/gen.png")).toBe("gen.png")
+  const handles = mount(SendRenderer, {
+    props: {
+      call: {
+        name: "qq_send",
+        status: "done",
+        args: { media: ["m4.1", "sticker:ok.png"] },
+        result: "Sent as m5, m6",
+      },
+    },
+  })
+  expect(handles.findAll("[data-test=media]").map((w) => w.text())).toEqual([
+    "chat media m4.1",
+    "sticker ok.png",
+  ])
   expect(mediaList("[broken")).toEqual(["[broken"])
 })

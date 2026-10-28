@@ -13,6 +13,7 @@ from kt_qqbot import hub as hub_registry
 from kt_qqbot import media
 from kt_qqbot.auth.credentials import Credentials, CredentialStore
 from kt_qqbot.errors import CredentialsMissing
+from kt_qqbot.hub import CLOSED_WINDOW
 from kt_qqbot.records import EVENT_C2C, EVENT_GROUP, EVENT_GROUP_AT
 from kt_qqbot.tools import QQHistoryTool, QQSendTool, QQWatchTool
 from kt_qqbot.trigger import QQFeedTrigger, feeds_of
@@ -76,7 +77,6 @@ class TestHub:
         self, make_hub, fake_api
     ):
         hub = make_hub()
-        fake_api.reject_active = True
         await hub.ingest(
             {
                 "conv": "group:G",
@@ -91,9 +91,8 @@ class TestHub:
         )
         assert not hub.ledger.usable("group:G", "group")
         result = await hub.send("group:G", "late")
-        assert not result.sent and "passive-reply window" in result.reason
-        body = fake_api.sent()[-1]
-        assert "msg_id" not in body
+        assert not result.sent and result.reason == CLOSED_WINDOW
+        assert fake_api.sent() == [], "no active message is attempted"
         await hub.close()
 
 
@@ -350,8 +349,8 @@ async def test_reply_ledger_survives_hub_restart(make_hub, fake_api, tmp_path):
     path = tmp_path / "ledger.kvault"
     hub = make_hub(store_path=path)
     await hub.on_dispatch(EVENT_GROUP, group_event("FULL", "G", "P", "a"))
-    for _ in range(4):
-        assert (await hub.send("group:G", "x")).passive
+    for _ in range(5):
+        assert (await hub.send("group:G", "x")).sent
     await hub.on_dispatch(EVENT_GROUP, group_event("PART", "G2", "P", "b"))
     assert (await hub.send("group:G2", "y")).passive
     await hub.on_dispatch(EVENT_GROUP, group_event("OLD", "G3", "P", "c"))
@@ -360,11 +359,14 @@ async def test_reply_ledger_survives_hub_restart(make_hub, fake_api, tmp_path):
 
     hub = make_hub(store_path=path)
     hub.ledger._clock = lambda: time.time() + 120
+    before = len(fake_api.sent())
     full = await hub.send("group:G", "after restart")
-    assert not full.passive, "a msg_id with all 4 slots used must not be reused"
-    assert "msg_id" not in fake_api.sent()[-1]
+    assert (
+        not full.sent and full.reason == CLOSED_WINDOW
+    ), "a spent msg_id is not reused"
+    assert len(fake_api.sent()) == before
     part = await hub.send("group:G2", "again")
-    assert part.passive
+    assert part.sent
     body = fake_api.sent()[-1]
     assert body["msg_id"] == "PART" and body["msg_seq"] == 2, "msg_seq continues"
     hub.store.close()

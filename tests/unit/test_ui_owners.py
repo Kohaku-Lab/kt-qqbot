@@ -344,13 +344,13 @@ class TestStatusPanelOwner:
         chat = events[-1][1]["feeds"][0]["chats"][0]
         assert chat["handle"] == "g_g1" and chat["type"] == "group"
         assert chat["unread"] == 3 and chat["seen"] is False
-        assert chat["free_slots"] == 12
+        assert chat["free_slots"] == 15
         assert [m["text"] for m in chat["last"]] == ["two", "three"]
         assert events[-1][1]["feeds"][0]["gateway"] == "test"
 
         await feed.wait_for_trigger()
         await hub.send("group:G1", "mine", by=feed.subscriber)
-        await _until(lambda: events[-1][1]["feeds"][0]["chats"][0]["free_slots"] == 11)
+        await _until(lambda: events[-1][1]["feeds"][0]["chats"][0]["free_slots"] == 14)
         chat = events[-1][1]["feeds"][0]["chats"][0]
         assert chat["seen"] is True and chat["unread"] == 0
         assert chat["last"][-1] == {**chat["last"][-1], "sender": "you", "self": True}
@@ -396,4 +396,16 @@ async def test_status_plugin_is_idle_without_hub_changes(make_hub, monkeypatch):
     await _until(lambda: len(computed) > baseline)
     await plugin.on_agent_stop()
     await feed.stop()
+    await hub.close()
+
+
+async def test_settings_state_shows_the_persisted_bot_name(make_hub):
+    CredentialStore().save(Credentials(APP_ID, SECRET))
+    hub = make_hub()
+    hub.remember_identity({"id": "B1", "username": "kohaku-bot"})
+    hub_registry._HUBS[APP_ID] = hub
+    assert QQBotUI().ui_state()["bots"][0]["name"] == "kohaku-bot"
+    reopened = make_hub()
+    assert reopened.bot_identity["username"] == "kohaku-bot"
+    hub_registry._HUBS.clear()
     await hub.close()

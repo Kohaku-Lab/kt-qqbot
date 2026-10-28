@@ -135,7 +135,7 @@ def test_render_media_markers():
         "reply_to": "OLD",
     }
     line = render_line(msg)
-    assert line.endswith("files [voice] [video] [file:a.pdf]")
+    assert line.endswith("files [voice m1.1] [video m1.2] [file:a.pdf m1.3]")
     assert "↩(older message)" in line
 
 
@@ -170,3 +170,69 @@ class TestCliManual:
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
         monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "")
         assert cli.main(["login", "--manual"]) == 1
+
+
+class TestOutboundMentions:
+    async def _group_with_members(self, hub):
+        await hub.on_dispatch(
+            EVENT_GROUP,
+            group_event(
+                "G1",
+                "G1",
+                "P1",
+                "hi",
+                author={"member_openid": "P1", "username": "琥珀青葉"},
+            ),
+        )
+        await hub.on_dispatch(
+            EVENT_GROUP,
+            group_event(
+                "G2",
+                "G1",
+                "P2",
+                "yo",
+                author={"member_openid": "P2", "username": "琥珀"},
+            ),
+        )
+
+    async def test_known_member_becomes_a_native_mention(self, make_hub, fake_api):
+        hub = make_hub()
+        await self._group_with_members(hub)
+        result = await hub.send(
+            "group:G1", "@琥珀青葉 你說得對, @琥珀 也是, @nobody 不是"
+        )
+        assert result.sent
+        wire = fake_api.sent()[-1]["content"]
+        assert wire == (
+            '<qqbot-at-user id="P1" /> 你說得對, '
+            '<qqbot-at-user id="P2" /> 也是, @nobody 不是'
+        )
+        stored = hub.store.get("group:G1", result.seqs[0])
+        assert stored["content"] == "@琥珀青葉 你說得對, @琥珀 也是, @nobody 不是"
+        await hub.close()
+
+    async def test_plain_format_private_chats_and_shared_names_stay_text(
+        self, make_hub, fake_api
+    ):
+        hub = make_hub()
+        await self._group_with_members(hub)
+        await hub.on_dispatch(
+            EVENT_GROUP,
+            group_event(
+                "G3",
+                "G1",
+                "P3",
+                "me too",
+                author={"member_openid": "P3", "username": "琥珀"},
+            ),
+        )
+        await hub.send("group:G1", "@琥珀 hi")
+        assert (
+            fake_api.sent()[-1]["content"] == "@琥珀 hi"
+        ), "two members share the name"
+        await hub.send("group:G1", "@琥珀青葉 hi", mention_format="plain")
+        assert fake_api.sent()[-1]["content"] == "@琥珀青葉 hi"
+        await hub.on_dispatch(EVENT_C2C, c2c_event("C1", "U1", "hello"))
+        await hub.send("c2c:U1", "@琥珀青葉 hi")
+        assert fake_api.sent()[-1]["content"] == "@琥珀青葉 hi"
+        await hub.close()

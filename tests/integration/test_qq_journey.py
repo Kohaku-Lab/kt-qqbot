@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 import kohakuterrarium.bootstrap.agent_init as agent_init_mod
 import kohakuterrarium.bootstrap.llm as bootstrap_llm_mod
@@ -28,11 +29,12 @@ from kt_qqbot import api as qq_api
 from kt_qqbot import hub as hub_registry
 from kt_qqbot.api import QQApi
 from kt_qqbot.auth.credentials import Credentials, CredentialStore
-from kt_qqbot.hub import QQHub
+from kt_qqbot.hub import CLOSED_WINDOW, QQHub
 from kt_qqbot.paths import root_dir
 from kt_qqbot.plugins.router import creature_id_for
 from kt_qqbot.records import EVENT_C2C, EVENT_GROUP
 from kt_qqbot.store import ChatStore
+from kt_qqbot.trigger import QQFeedTrigger, feeds_of
 
 from tests.conftest import APP_ID, SECRET, _NoGateway, c2c_event, group_event
 
@@ -66,6 +68,15 @@ async def _until(predicate, timeout=30.0):
     raise AssertionError("condition not reached in time")
 
 
+def _is_persona_pin(message: dict) -> bool:
+    content = message.get("content")
+    if message.get("role") != "user" or not isinstance(content, list):
+        return False
+    texts = [p.get("text", "") for p in content if p.get("type") == "text"]
+    images = [p for p in content if p.get("type") == "image_url"]
+    return bool(texts and texts[0].startswith("[reference image]") and images)
+
+
 def _write_configs(tmp_path: Path) -> Path:
     template = tmp_path / "template"
     template.mkdir()
@@ -81,6 +92,8 @@ def _write_configs(tmp_path: Path) -> Path:
         "    conversations: all\n"
         "    wake: all\n"
         "    batch_delay: 0\n"
+        "compact:\n"
+        "  keep_recent_turns: 1\n"
         "tools:\n"
         "  - name: qq_send\n"
         "    type: package\n"
@@ -112,6 +125,7 @@ def _write_configs(tmp_path: Path) -> Path:
 async def test_router_journey(tmp_path, monkeypatch, fake_api):
     CredentialStore().save(Credentials(APP_ID, SECRET))
     (root_dir() / "character.md").write_text("You are Kohaku, a cat.", encoding="utf-8")
+    Image.new("RGB", (1024, 512), (240, 200, 120)).save(root_dir() / "character.png")
     store_path = tmp_path / "chat.kvault"
 
     def factory(creds):
@@ -127,9 +141,10 @@ async def test_router_journey(tmp_path, monkeypatch, fake_api):
         )
 
     monkeypatch.setattr(hub_registry, "HUB_FACTORY", factory)
-    (tmp_path / "drawn.png").write_bytes(b"\x89PNG generated")
-    (tmp_path / "notes.pdf").write_bytes(b"%PDF-1.4")
-    script = _script(str(tmp_path / "drawn.png"), str(tmp_path / "notes.pdf"))
+    stickers = root_dir() / "stickers"
+    stickers.mkdir(parents=True)
+    (stickers / "happy.png").write_bytes(b"\x89PNG sticker")
+    script = _script("m1.1", "sticker:happy.png")
     llms: dict[str, list[ScriptedLLM]] = {}
 
     def create(config, *args, **kwargs):
@@ -147,11 +162,15 @@ async def test_router_journey(tmp_path, monkeypatch, fake_api):
     await engine.add_creature(str(router_path))
     hub = hub_registry.running_hubs()[APP_ID]
 
-    await hub.on_dispatch(EVENT_C2C, c2c_event("C1", "U1", "hello bot"))
+    photo = {"content_type": "image/png", "url": "https://img.test/cat.png"}
+    await hub.on_dispatch(
+        EVENT_C2C, c2c_event("C1", "U1", "hello bot", attachments=[photo])
+    )
     await _until(lambda: len(fake_api.sent()) >= 3)
     assert c2c_id in engine
     first = llms["qq-u_u1"][0].call_log[0]
     system = first[0]["content"]
+    assert _is_persona_pin(first[1]), "the persona pin follows the system prompt"
     assert "QQ chat member" in system and "## Character" in system
     assert "You are Kohaku, a cat." in system
     delivered = first[-1]["content"]
@@ -166,8 +185,11 @@ async def test_router_journey(tmp_path, monkeypatch, fake_api):
     assert [image_msg["msg_type"], file_msg["msg_type"]] == [7, 7]
     assert [image_msg["msg_seq"], file_msg["msg_seq"]] == [2, 3]
     assert image_msg["msg_id"] == file_msg["msg_id"] == "C1"
-    assert [u["file_type"] for u in fake_api.sent("/files")] == [1, 4]
-    assert "[file: notes.pdf]" in hub.store.get("c2c:U1", 4)["content"]
+    uploads = fake_api.sent("/files")
+    assert uploads[0]["file_type"] == 1 and uploads[0]["url"] == photo["url"]
+    assert uploads[1]["file_type"] == 1 and "file_data" in uploads[1]
+    assert "[image: happy.png]" in hub.store.get("c2c:U1", 4)["content"]
+    assert "[image m1.1]" in delivered
     mine = hub.store.get("c2c:U1", 2)
     assert mine["self"] and mine["by"] == c2c_id and mine["content"] == "hi there"
     assert hub._refs == 2, "router + one chat creature share the hub"
@@ -175,16 +197,47 @@ async def test_router_journey(tmp_path, monkeypatch, fake_api):
     await hub.on_dispatch(EVENT_GROUP, group_event("G-1", "G1", "P1", "group chatter"))
     await _until(lambda: any(llm.call_count for llm in llms.get("qq-g_g1", [])))
     assert group_id in engine
+    group_chat = engine.get_creature(group_id)
+    group_llm = llms["qq-g_g1"][-1]
+    turns = len(group_llm.call_log)
+    await hub.on_dispatch(EVENT_GROUP, group_event("G-1b", "G1", "P2", "more chatter"))
+    await _until(lambda: len(group_llm.call_log) > turns)
+    await asyncio.sleep(0.2)
+    before = len(group_chat.agent.controller.conversation.get_messages())
+    assert group_chat.agent.compact_manager.trigger_compact(), "compaction runs"
+    await group_chat.agent.compact_manager.wait_for_current()
+    assert len(group_chat.agent.controller.conversation.get_messages()) < before
+    calls_before = len(group_llm.call_log)
+    await hub.on_dispatch(EVENT_GROUP, group_event("G-2", "G1", "P1", "after compact"))
+    await _until(lambda: len(group_llm.call_log) > calls_before)
+    after = group_llm.call_log[-1]
+    assert _is_persona_pin(after[1]), "the pin survives compaction"
+    assert sum(_is_persona_pin(m) for m in after) == 1
     await asyncio.sleep(0.3)
     assert not [p for m, p, _ in fake_api.requests if p.startswith("/v2/groups")]
 
+    hub.remember_identity({"id": "BOTJ", "username": "kt-journey"})
+    first_meta = hub.store.conv_meta("c2c:U1")
     await engine.shutdown()
     assert hub_registry.running_hubs() == {}
 
-    engine2 = Terrarium(session_dir=str(tmp_path / "sessions2"))
+    # Restart on the SAME session dir: chats come back with their history.
+    engine2 = Terrarium(session_dir=str(tmp_path / "sessions"))
     await engine2.add_creature(str(router_path))
     await _until(lambda: c2c_id in engine2 and group_id in engine2)
     hub2 = hub_registry.running_hubs()[APP_ID]
+    assert hub2.bot_id == "BOTJ" and hub2.bot_identity["username"] == "kt-journey"
+    meta = hub2.store.conv_meta("c2c:U1")
+    assert meta["first_seen"] == first_meta["first_seen"] and meta["kind"] == "c2c"
+    assert hub2.store.handle("c2c:U1") == "u_u1"
+    assert hub2._refs == 3, "router + two chat creatures, one ref each"
+    restored_chat = engine2.get_creature(c2c_id)
+    assert len(feeds_of(restored_chat.agent)) == 1
+    history = [
+        str(m.content)
+        for m in restored_chat.agent.controller.conversation.get_messages()
+    ]
+    assert any("hello bot" in h for h in history), "the conversation came back"
     restored = hub2.store.slots()
     assert restored["C1"]["used"] == 3 and restored["C1"]["last_seq"] == 3
     await hub2.on_dispatch(EVENT_C2C, c2c_event("C2", "U1", "are you there"))
@@ -200,11 +253,44 @@ async def test_router_journey(tmp_path, monkeypatch, fake_api):
     assert hub2.store.slots()["C2"]["used"] == 4
     fresh_llm = llms["qq-u_u1"][-1]
     first_call = fresh_llm.call_log[0]
-    user_text = " ".join(
-        str(m.get("content")) for m in first_call if m["role"] == "user"
+    assert _is_persona_pin(first_call[1]), "the pin is restored after the restart"
+    assert sum(_is_persona_pin(m) for m in first_call) == 1, "restored once"
+    users = [
+        str(m.get("content"))
+        for m in first_call
+        if m["role"] == "user" and not _is_persona_pin(m)
+    ]
+    assert any("hello bot" in u for u in users[:-1]), "history is in the prompt"
+    assert "are you there" in users[-1]
+    assert "hello bot" not in users[-1], "the cursor survived the restart"
+
+    # Full-message mode: every group message is GROUP_MESSAGE_CREATE.
+    mention_feed = QQFeedTrigger(
+        wake="mention", batch_delay=0, conversations=["group:GM"], subscriber="jm"
     )
-    assert "are you there" in user_text
-    assert "hello bot" not in user_text, "the cursor survived the restart"
+    await mention_feed.attach(hub2)
+    await mention_feed.start()
+    await hub2.on_dispatch(EVENT_GROUP, group_event("GM-1", "GM", "P1", "chatter"))
+    assert await mention_feed.wait_for_trigger() is None, "plain chat does not wake"
+    await hub2.on_dispatch(
+        EVENT_GROUP,
+        group_event("GM-2", "GM", "P2", "hey bot", mentions=[{"is_you": True}]),
+    )
+    woke = await mention_feed.wait_for_trigger()
+    assert woke is not None and woke.context["mention"] is True
+    assert "hey bot" in woke.content
+    await mention_feed.stop()
+    await hub2.on_dispatch(EVENT_GROUP, group_event("GP-1", "GP", "P3", "plain"))
+    before = len(fake_api.sent())
+    for i in range(5):
+        assert (await hub2.send("group:GP", f"r{i}")).sent
+    bodies = fake_api.sent()[before:]
+    assert [(b["msg_id"], b["msg_seq"]) for b in bodies] == [
+        ("GP-1", n) for n in range(1, 6)
+    ]
+    sixth = await hub2.send("group:GP", "one too many")
+    assert not sixth.sent and sixth.reason == CLOSED_WINDOW
+    assert len(fake_api.sent()) == before + 5, "no active message is attempted"
     await engine2.shutdown()
     assert hub_registry.running_hubs() == {}
 

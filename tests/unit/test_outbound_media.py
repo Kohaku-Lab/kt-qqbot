@@ -110,6 +110,8 @@ class TestQQSendMedia:
         assert result.output.startswith("Sent as m"), result
         assert [u["file_type"] for u in fake_api.sent("/files")] == [1, 4]
         assert [m["msg_type"] for m in fake_api.sent()] == [0, 7, 7]
+        await hub.on_dispatch(EVENT_C2C, c2c_event("C2", "U1", "more please"))
+        await feed.wait_for_trigger()
         again = await send.execute(
             {"message": "", "media": ("notes.pdf", "out/gen.png")}, context=ctx
         )

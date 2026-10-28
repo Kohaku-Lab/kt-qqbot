@@ -89,7 +89,7 @@ class TestQQApi:
         with pytest.raises(QQApiError) as info:
             await api.send_message("c2c", "U1", content="x")
         await api.aclose()
-        assert info.value.code == 40054005
+        assert info.value.code == 304003
         assert info.value.message == "msg_id expired"
 
     async def test_401_retries_once_with_new_token(self, fake_api):

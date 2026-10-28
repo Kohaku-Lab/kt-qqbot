@@ -5,8 +5,10 @@ chats that feed has delivered to this creature.
 """
 
 import re
+import time
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import urlparse
 
 from kohakuterrarium.modules.tool.base import (
     BaseTool,
@@ -20,13 +22,27 @@ from kohakuterrarium.utils.logging import get_logger
 
 from kt_qqbot import access
 from kt_qqbot.errors import MediaError
+from kt_qqbot.handles import SEARCHES, owner_of, parse_chat_handle
+from kt_qqbot.media import cached_attachment
 from kt_qqbot.outbound import MAX_SINGLE_UPLOAD_BYTES as MAX_UPLOAD
-from kt_qqbot.outbound import MEDIA_TYPES, MediaItem, parse_media_arg, prepare
+from kt_qqbot.outbound import (
+    MEDIA_TYPES,
+    MediaItem,
+    check_size,
+    parse_media_arg,
+    prepare,
+)
+from kt_qqbot.paths import root_dir
+from kt_qqbot.persona import find_persona
+from kt_qqbot.render import media_kind
+from kt_qqbot.stickers import StickerLibrary
 from kt_qqbot.trigger import QQFeedTrigger, feeds_of
 
 logger = get_logger("kt_qqbot.tools")
 
 MAX_MESSAGE_CHARS = 2000
+# QQ attachment links stop working after a while; older handles need a cached copy.
+ATTACHMENT_TTL_S = 24 * 3600
 HISTORY_MAX = 100
 _TAG = re.compile(r"^m?(\d+)$")
 
@@ -41,7 +57,7 @@ Send one chat message to a QQ chat (private or group) that your feed delivered.
 | message | string | The text of one chat message. |
 | to | string | Chat handle such as `g_ab12cd` or `u_ab12cd`. Optional when your last delivery came from one chat. |
 | reply_to | string | Message tag such as `m41` to quote. Optional. |
-| media | string or list | A local path (relative to your working folder) or an https URL; a list is sent in order. Optional. |
+| media | string or list | A handle (`m12.1` or `<chat>/m12.1` for a chat attachment, `sticker:<name>` from qq_sticker, `img:<n>` from qq_image_search, `persona` for your own picture), a local path in your working folder, or an https URL; a list is sent in order. Optional. |
 | media_type | string | `image`, `video`, `voice` or `file`. Optional; inferred from the file name. |
 
 ## Behavior
@@ -56,8 +72,10 @@ Send one chat message to a QQ chat (private or group) that your feed delivered.
 - Voice must be SILK; other audio is converted when the voice codec is
   installed. Local files over 5 MB cannot be sent yet.
 - Group chats do not take `file` messages.
-- A reply rides on a recent incoming message. When the chat has been silent too
-  long, QQ may refuse the send; the result says so.
+- Every message is a reply to a recent incoming message: within 5 min in a
+  group (5 replies per message) and 60 min in a private chat (4 replies). QQ
+  has no other way for a bot to speak; when no reply is left the result says
+  the reply window has closed.
 """
 
 HISTORY_DOC = """# qq_history
@@ -118,6 +136,14 @@ class QQSendTool(BaseTool):
         super().__init__(config)
         self.max_chars = int(options.get("max_chars", MAX_MESSAGE_CHARS))
         self.allow_group_files = bool(options.get("allow_group_files", False))
+        self.mention_format = str(options.get("mention_format", "native"))
+        if self.mention_format not in ("native", "plain"):
+            raise ValueError("mention_format must be 'native' or 'plain'")
+        self.sticker_directory = options.get("sticker_directory")
+        character_dir = options.get("character_directory")
+        self.character_directory = (
+            Path(character_dir).expanduser() if character_dir else None
+        )
         self.media_roots = [
             Path(root).expanduser().resolve()
             for root in options.get("media_roots") or []
@@ -225,6 +251,7 @@ class QQSendTool(BaseTool):
             by=feed.subscriber or "",
             reply_to_seq=reply_seq,
             media=media,
+            mention_format=self.mention_format,
         )
         if result.sent:
             return ToolResult(output=f"Sent as {_tags(result.seqs)}", exit_code=0)
@@ -259,9 +286,12 @@ class QQSendTool(BaseTool):
             return path
 
         limit = None if feed.hub.chunked_uploader is not None else MAX_UPLOAD
-        items = [
-            await prepare(spec, media_type, resolve, size_limit=limit) for spec in specs
-        ]
+        items = []
+        for spec in specs:
+            handle = self._resolve_handle(spec, media_type, cid, feed, context)
+            if handle is None:
+                handle = await prepare(spec, media_type, resolve, size_limit=limit)
+            items.append(handle)
         if cid.startswith("group:") and not self.allow_group_files:
             if any(item.media_type == "file" for item in items):
                 raise MediaError(
@@ -269,6 +299,81 @@ class QQSendTool(BaseTool):
                     "private chat, or as an image or video"
                 )
         return items
+
+    def _resolve_handle(
+        self,
+        spec: str,
+        media_type: str | None,
+        cid: str,
+        feed: QQFeedTrigger,
+        context: ToolContext | None,
+    ) -> MediaItem | None:
+        """Resolve ``persona`` / ``sticker:`` / ``img:`` / ``m<seq>.<n>`` handles; None for paths."""
+        if spec == "persona":
+            folder = self.character_directory or root_dir()
+            path, _ = find_persona(folder)
+            if path is None:
+                raise MediaError(
+                    "no persona image; the user can add character.png (or .jpg / "
+                    f".webp) to {folder}"
+                )
+            item = MediaItem(
+                "image", MEDIA_TYPES["image"], path.name, data=path.read_bytes()
+            )
+            check_size(item)
+            return item
+        if spec.startswith("sticker:"):
+            try:
+                path = StickerLibrary(self.sticker_directory).resolve(spec[8:])
+            except ValueError as exc:
+                raise MediaError(str(exc)) from exc
+            item = MediaItem(
+                "image", MEDIA_TYPES["image"], path.name, data=path.read_bytes()
+            )
+            check_size(item)
+            return item
+        if spec.startswith("img:"):
+            number = int(spec[4:]) if spec[4:].isdigit() else 0
+            result = SEARCHES.get(owner_of(context), number)
+            if result is None:
+                raise MediaError(
+                    f"{spec} is not a current search result; search again "
+                    "(handles come from your own latest qq_image_search, 15 min)"
+                )
+            name = Path(urlparse(result.url).path).name or "image"
+            return MediaItem("image", MEDIA_TYPES["image"], name, url=result.url)
+        parsed = parse_chat_handle(spec)
+        if parsed is None:
+            return None
+        chat, seq, index = parsed
+        store = feed.hub.store
+        source = cid
+        if chat is not None:
+            source = store.resolve_handle(chat) or ""
+            if not source or not feed.known(source):
+                raise MediaError(
+                    f"unknown chat {chat!r}; you can only use chats your feed delivered"
+                )
+        record = store.get(source, seq)
+        if record is None:
+            raise MediaError(f"m{seq} is no longer kept; ask for it again")
+        attachments = record.get("attachments") or []
+        if not 1 <= index <= len(attachments):
+            raise MediaError(f"{spec}: m{seq} has no attachment {index}")
+        att = attachments[index - 1]
+        kind = media_type or media_kind(att.get("content_type", ""))
+        name = att.get("filename") or f"m{seq}.{index}"
+        cached = cached_attachment(feed.hub.app_id, str(record.get("msg_id")), index)
+        age = time.time() - float(record.get("recv") or record.get("ts") or 0)
+        url = str(att.get("url") or "")
+        if age > ATTACHMENT_TTL_S or not url.startswith("https://"):
+            if cached is None:
+                raise MediaError(
+                    f"{spec} is too old to resend (QQ attachment links expire); "
+                    "ask for it again"
+                )
+            return MediaItem(kind, MEDIA_TYPES[kind], name, data=cached.read_bytes())
+        return MediaItem(kind, MEDIA_TYPES[kind], name, url=url, fallback=cached)
 
 
 class QQHistoryTool(BaseTool):

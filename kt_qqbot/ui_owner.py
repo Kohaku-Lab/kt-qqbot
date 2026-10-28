@@ -74,6 +74,7 @@ class QQBotUI(UIOwnerMixin):
             bots.append(
                 {
                     "app_id": app_id,
+                    "name": hub.bot_identity.get("username", "") if hub else "",
                     "source": "file",
                     "default": app_id == default,
                     "gateway": hub.status if hub else "not running",
@@ -85,6 +86,7 @@ class QQBotUI(UIOwnerMixin):
             bots.append(
                 {
                     "app_id": env_id,
+                    "name": hub.bot_identity.get("username", "") if hub else "",
                     "source": "env",
                     "default": not default,
                     "gateway": hub.status if hub else "not running",

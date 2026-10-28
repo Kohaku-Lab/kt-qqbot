@@ -84,6 +84,7 @@ export const SettingsSection = {
       <p v-if="!bots.length" class="qq-muted">{{ kt.t("noBots") }}</p>
       <div v-for="bot in bots" :key="bot.app_id" class="qq-row" data-test="bot">
         <code>{{ bot.app_id }}</code>
+        <strong v-if="bot.name" data-test="bot-name">{{ bot.name }}</strong>
         <span v-if="bot.default" class="qq-badge">{{ kt.t("default") }}</span>
         <span v-if="bot.source === 'env'" class="qq-badge">{{ kt.t("fromEnv") }}</span>
         <span class="qq-badge" :class="bot.gateway === 'ready' ? 'ok' : (bot.gateway === 'fatal' || bot.gateway === 'unbound') ? 'bad' : ''">{{ kt.t("gateway", { state: bot.gateway }) }}</span>
@@ -166,6 +167,15 @@ export function mediaList(value) {
   return [text]
 }
 
+/** A short label for a qq_send media spec: a handle or a file name. */
+export function mediaLabel(spec) {
+  if (spec.startsWith("sticker:")) return `sticker ${spec.slice(8)}`
+  if (spec.startsWith("img:")) return `search image ${spec.slice(4)}`
+  const chat = /^(?:([\w:.-]+)\/)?m(\d+)\.(\d+)$/.exec(spec)
+  if (chat) return `chat media ${chat[1] ? chat[1] + "/" : ""}m${chat[2]}.${chat[3]}`
+  return spec.split(/[\\/]/).pop().split("?")[0]
+}
+
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp)(\?|$)/i
 
 export const SendRenderer = {
@@ -177,7 +187,7 @@ export const SendRenderer = {
     const media = computed(() =>
       mediaList(args.value.media).map((spec) => ({
         spec,
-        name: spec.split(/[\\/]/).pop().split("?")[0],
+        name: mediaLabel(spec),
         thumb: spec.startsWith("https://") && IMAGE_RE.test(spec),
       })),
     )
