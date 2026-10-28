@@ -84,16 +84,17 @@ class QQFeedTrigger(BaseTrigger):
         bot: str | None = None,
         conversations: str | list[str] = "all",
         wake: str = "ambient",
-        quiet_period: float = 20.0,
-        every_n: int = 8,
-        cooldown: float = 60.0,
-        batch_delay: float = 1.0,
+        quiet_period: float = 6.0,
+        every_n: int = 5,
+        cooldown: float = 15.0,
+        batch_delay: float = 0.5,
         backfill: int = 20,
         hold: bool = True,
         typing: bool = False,
         images: bool = True,
         image_detail: str = "auto",
         max_images: int = 8,
+        image_timeout: float = 5.0,
         subscriber: str | None = None,
         max_delivery: int = 100,
         unseen_history: str = "backfill",
@@ -115,6 +116,7 @@ class QQFeedTrigger(BaseTrigger):
             images=images,
             image_detail=image_detail,
             max_images=max_images,
+            image_timeout=image_timeout,
             subscriber=subscriber,
             max_delivery=max_delivery,
             unseen_history=unseen_history,
@@ -138,6 +140,7 @@ class QQFeedTrigger(BaseTrigger):
             enabled=bool(images),
             detail=image_detail,  # type: ignore[arg-type]
             max_per_delivery=int(max_images),
+            timeout=float(image_timeout),
         )
         if unseen_history not in ("backfill", "new"):
             raise ValueError("unseen_history must be 'backfill' or 'new'")

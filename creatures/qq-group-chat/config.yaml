@@ -31,10 +31,10 @@ triggers:
     class: QQFeedTrigger
     conversations: all
     wake: ambient
-    quiet_period: 20
-    every_n: 8
-    cooldown: 60
-    batch_delay: 1.0
+    quiet_period: 6
+    every_n: 5
+    cooldown: 15
+    batch_delay: 0.5
     backfill: 20
 
 tools:

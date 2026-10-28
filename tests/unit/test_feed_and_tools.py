@@ -428,3 +428,11 @@ class TestMidTurn:
         assert "hello" in (await _next(feed)).content
         await feed.stop()
         await hub.close()
+
+
+def test_feed_defaults_favor_low_latency():
+    feed = QQFeedTrigger()
+    policy = feed.policy
+    assert (policy.quiet_period, policy.every_n, policy.cooldown) == (6.0, 5, 15.0)
+    assert feed.batch_delay == 0.5 and feed.image_options.timeout == 5.0
+    assert feed.to_resume_dict()["image_timeout"] == 5.0

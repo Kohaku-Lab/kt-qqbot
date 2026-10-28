@@ -87,10 +87,10 @@ option must match `qq_character`'s `directory` if you moved the folder.
 | `bot` | default bot | AppID to use |
 | `conversations` | `all` | `all`, `c2c`, `groups`, or a list of chat handles / `group:<openid>` keys |
 | `wake` | `ambient` | `mention`: only private chat, @-mentions, replies to the bot. `all`: every message. `ambient`: direct messages at once, otherwise after `quiet_period` or `every_n` messages, never sooner than `cooldown` after the last ambient wake |
-| `quiet_period` | `20` | seconds of silence before an ambient wake |
-| `every_n` | `8` | pending messages that force an ambient wake |
-| `cooldown` | `60` | seconds between ambient wakes in one chat |
-| `batch_delay` | `1.0` | seconds to wait so a burst lands in one delivery |
+| `quiet_period` | `6` | seconds of silence before an ambient wake |
+| `every_n` | `5` | pending messages that force an ambient wake |
+| `cooldown` | `15` | seconds between ambient wakes in one chat |
+| `batch_delay` | `0.5` | seconds to wait so a burst lands in one delivery |
 | `backfill` | `20` | on a chat's first delivery, how many messages from before the feed started to show as `<qq_backfill>` |
 | `max_delivery` | `100` | most lines per chat in one delivery; older ones become "N earlier messages not shown; use qq_history" |
 | `unseen_history` | `backfill` | `backfill`: undelivered messages from before the feed started show as history; `new`: as new chat |
@@ -98,6 +98,7 @@ option must match `qq_character`'s `directory` if you moved the folder.
 | `mid_turn` | `true` | chat that arrives while the creature is in a turn is folded into that turn before its next model call |
 | `typing` | `false` | send the private-chat typing indicator on wake (uses a reply slot) |
 | `images` / `image_detail` / `max_images` | `true` / `auto` / `8` | inbound images as vision input |
+| `image_timeout` | `5.0` | seconds per inbound image; images download in parallel and a slow or failed one is skipped, never holding back the text |
 | `subscriber` | the host creature's id (from core `bind_host`) | cursor key; set it only to share or pin a cursor |
 
 The creature can also install a feed itself: add the `qq_watch` tool
