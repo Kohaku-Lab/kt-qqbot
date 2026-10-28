@@ -42,6 +42,7 @@ class MediaItem:
     name: str
     data: bytes | None = None
     url: str | None = None
+    fallback: Path | None = None
 
 
 class ChunkedUploader(Protocol):

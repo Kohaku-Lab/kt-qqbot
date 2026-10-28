@@ -41,18 +41,28 @@ def _clock(ts: float | None) -> str:
     return datetime.fromtimestamp(float(ts)).strftime("%H:%M")
 
 
+def media_kind(content_type: str) -> str:
+    """Return image / voice / video / file for an attachment content type."""
+    kind = str(content_type or "")
+    if kind.startswith("image/"):
+        return "image"
+    if kind.startswith("voice") or kind.startswith("audio/"):
+        return "voice"
+    if kind.startswith("video/"):
+        return "video"
+    return "file"
+
+
 def _media(message: dict) -> str:
     marks = []
-    for att in message.get("attachments") or []:
-        kind = str(att.get("content_type", ""))
-        if kind.startswith("image/"):
-            marks.append("[image]")
-        elif kind.startswith("voice") or kind.startswith("audio/"):
-            marks.append("[voice]")
-        elif kind.startswith("video/"):
-            marks.append("[video]")
+    seq = message.get("seq")
+    for index, att in enumerate(message.get("attachments") or [], start=1):
+        handle = f"m{seq}.{index}"
+        kind = media_kind(att.get("content_type", ""))
+        if kind == "file":
+            marks.append(f"[file:{safe_name(att.get('filename') or 'file')} {handle}]")
         else:
-            marks.append(f"[file:{safe_name(att.get('filename') or 'file')}]")
+            marks.append(f"[{kind} {handle}]")
     return (" " + " ".join(marks)) if marks else ""
 
 

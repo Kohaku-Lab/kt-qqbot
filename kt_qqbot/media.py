@@ -5,6 +5,7 @@ import base64
 import ipaddress
 import socket
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -13,10 +14,13 @@ import httpx
 from kohakuterrarium.llm.message import ImagePart
 from kohakuterrarium.utils.logging import get_logger
 
+from kt_qqbot.paths import media_dir
+
 logger = get_logger("kt_qqbot.media")
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 DOWNLOAD_TIMEOUT_S = 30.0
+MAX_CACHED_FILES = 500
 
 
 @dataclass
@@ -77,15 +81,43 @@ async def fetch_image(
     return b"".join(chunks), mime
 
 
+def _cache_file(app_id: str, msg_id: str, index: int) -> Path:
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in msg_id)
+    return media_dir() / app_id / f"{safe}.{index}"
+
+
+def cache_attachment(app_id: str, msg_id: str, index: int, data: bytes) -> Path:
+    """Keep a downloaded attachment so it can be resent later (bounded count)."""
+    path = _cache_file(app_id, msg_id, index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    files = sorted(path.parent.iterdir(), key=lambda p: p.stat().st_mtime)
+    for old in files[:-MAX_CACHED_FILES]:
+        old.unlink(missing_ok=True)
+    return path
+
+
+def cached_attachment(app_id: str, msg_id: str, index: int) -> Path | None:
+    """Return the cached copy of an attachment, if one was kept."""
+    path = _cache_file(app_id, msg_id, index)
+    return path if path.is_file() else None
+
+
 async def images_for(
-    client: httpx.AsyncClient, messages: list[dict], options: ImageOptions
+    client: httpx.AsyncClient,
+    messages: list[dict],
+    options: ImageOptions,
+    cache_app: str | None = None,
 ) -> list[ImagePart]:
-    """Download the image attachments of ``messages`` as data-URL image parts."""
+    """Download the image attachments of ``messages`` as data-URL image parts.
+
+    With ``cache_app`` each downloaded image is also kept for resending.
+    """
     if not options.enabled:
         return []
     parts: list[ImagePart] = []
     for msg in messages:
-        for att in msg.get("attachments") or []:
+        for index, att in enumerate(msg.get("attachments") or [], start=1):
             if len(parts) >= options.max_per_delivery:
                 return parts
             if not str(att.get("content_type", "")).startswith("image/"):
@@ -97,13 +129,18 @@ async def images_for(
             except (httpx.HTTPError, ValueError) as exc:
                 logger.info("Image skipped", url=att.get("url"), error=str(exc))
                 continue
+            if cache_app and msg.get("msg_id"):
+                try:
+                    cache_attachment(cache_app, str(msg["msg_id"]), index, data)
+                except OSError as exc:
+                    logger.debug("Attachment not cached", error=str(exc))
             encoded = base64.b64encode(data).decode("ascii")
             parts.append(
                 ImagePart(
                     url=f"data:{mime};base64,{encoded}",
                     detail=options.detail,
                     source_type="qq",
-                    source_name=f"m{msg.get('seq')} {att.get('filename') or 'image'}",
+                    source_name=f"m{msg.get('seq')}.{index}",
                 )
             )
     return parts
