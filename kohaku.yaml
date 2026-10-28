@@ -1,5 +1,5 @@
 name: kt-qqbot
-version: 0.1.0
+version: 0.1.1
 description: >-
   QQ bot for KohakuTerrarium: a qq_feed trigger that delivers QQ private and
   group chat as incremental updates, and qq_send / qq_history tools the
