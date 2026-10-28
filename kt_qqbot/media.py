@@ -20,6 +20,7 @@ logger = get_logger("kt_qqbot.media")
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 DOWNLOAD_TIMEOUT_S = 30.0
+IMAGE_TIMEOUT_S = 5.0
 MAX_CACHED_FILES = 500
 
 
@@ -31,6 +32,7 @@ class ImageOptions:
     detail: Literal["auto", "low", "high"] = "auto"
     max_per_delivery: int = 8
     max_bytes: int = MAX_IMAGE_BYTES
+    timeout: float = IMAGE_TIMEOUT_S
 
 
 class BlockedAddress(ValueError):
@@ -115,32 +117,34 @@ async def images_for(
     """
     if not options.enabled:
         return []
-    parts: list[ImagePart] = []
+    jobs: list[tuple[dict, int, str]] = []
     for msg in messages:
         for index, att in enumerate(msg.get("attachments") or [], start=1):
-            if len(parts) >= options.max_per_delivery:
-                return parts
-            if not str(att.get("content_type", "")).startswith("image/"):
-                continue
-            try:
-                data, mime = await fetch_image(
-                    client, att["url"], max_bytes=options.max_bytes
-                )
-            except (httpx.HTTPError, ValueError) as exc:
-                logger.info("Image skipped", url=att.get("url"), error=str(exc))
-                continue
-            if cache_app and msg.get("msg_id"):
-                try:
-                    cache_attachment(cache_app, str(msg["msg_id"]), index, data)
-                except OSError as exc:
-                    logger.debug("Attachment not cached", error=str(exc))
-            encoded = base64.b64encode(data).decode("ascii")
-            parts.append(
-                ImagePart(
-                    url=f"data:{mime};base64,{encoded}",
-                    detail=options.detail,
-                    source_type="qq",
-                    source_name=f"m{msg.get('seq')}.{index}",
-                )
+            if str(att.get("content_type", "")).startswith("image/"):
+                jobs.append((msg, index, str(att.get("url") or "")))
+    jobs = jobs[: options.max_per_delivery]
+
+    async def one(msg: dict, index: int, url: str) -> ImagePart | None:
+        try:
+            data, mime = await asyncio.wait_for(
+                fetch_image(client, url, max_bytes=options.max_bytes),
+                timeout=options.timeout,
             )
-    return parts
+        except (httpx.HTTPError, ValueError, TimeoutError) as exc:
+            logger.info("Image skipped", url=url, error=str(exc) or type(exc).__name__)
+            return None
+        if cache_app and msg.get("msg_id"):
+            try:
+                cache_attachment(cache_app, str(msg["msg_id"]), index, data)
+            except OSError as exc:
+                logger.debug("Attachment not cached", error=str(exc))
+        encoded = base64.b64encode(data).decode("ascii")
+        return ImagePart(
+            url=f"data:{mime};base64,{encoded}",
+            detail=options.detail,
+            source_type="qq",
+            source_name=f"m{msg.get('seq')}.{index}",
+        )
+
+    results = await asyncio.gather(*(one(*job) for job in jobs))
+    return [part for part in results if part is not None]

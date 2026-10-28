@@ -1,6 +1,7 @@
 """Hub lifecycle and registry, media guards, render markers, CLI manual login."""
 
 import asyncio
+import time
 
 import httpx
 import pytest
@@ -119,6 +120,40 @@ class TestMedia:
         assert (
             await media.images_for(client, messages, ImageOptions(enabled=False)) == []
         )
+        await client.aclose()
+
+    async def test_images_download_in_parallel_and_a_slow_one_is_skipped(
+        self, monkeypatch
+    ):
+        async def allow(url):
+            return None
+
+        async def handler(request):
+            if request.url.path == "/hang.png":
+                await asyncio.sleep(5)
+            else:
+                await asyncio.sleep(0.2)
+            return httpx.Response(
+                200, content=b"img", headers={"content-type": "image/png"}
+            )
+
+        monkeypatch.setattr(media, "check_public_url", allow)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        messages = [
+            {
+                "seq": 7,
+                "attachments": [
+                    {"content_type": "image/png", "url": "https://a/hang.png"},
+                    {"content_type": "image/png", "url": "https://a/one.png"},
+                    {"content_type": "image/png", "url": "https://a/two.png"},
+                ],
+            }
+        ]
+        start = time.monotonic()
+        parts = await media.images_for(client, messages, ImageOptions(timeout=0.6))
+        elapsed = time.monotonic() - start
+        assert [p.source_name for p in parts] == ["m7.2", "m7.3"]
+        assert elapsed < 1.0, "downloads run in parallel and the hung one times out"
         await client.aclose()
 
 
