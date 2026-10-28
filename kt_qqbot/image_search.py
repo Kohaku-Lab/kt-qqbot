@@ -1,24 +1,23 @@
 """Image search backends for ``qq_image_search``.
 
 :class:`BraveImageSearch` uses the Brave Search API (``BRAVE_API_KEY``) with
-strict safe search. :class:`DuckDuckGoImageSearch` uses DuckDuckGo's
-unofficial image endpoint (token page, then ``i.js``) as a best-effort
-fallback; it can break without notice.
+strict safe search. :class:`DuckDuckGoImageSearch` uses the ``ddgs``
+library (the same one core ``web_search`` uses) with safe search on.
 """
 
+import asyncio
 import os
-import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
+from ddgs import DDGS
+from ddgs.exceptions import DDGSException
 
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/images/search"
-DDG_HOME = "https://duckduckgo.com/"
-DDG_IMAGES = "https://duckduckgo.com/i.js"
 REQUEST_TIMEOUT_S = 15.0
-USER_AGENT = "Mozilla/5.0 (compatible; kt-qqbot)"
-_VQD = re.compile(r"""vqd=["']?([\d-]+)""")
+NO_RESULTS = "No results"
 
 
 class ImageSearchError(RuntimeError):
@@ -89,51 +88,27 @@ class BraveImageSearch:
 
 
 class DuckDuckGoImageSearch:
-    """DuckDuckGo images (unofficial): fetch a ``vqd`` token, then ``i.js``."""
+    """DuckDuckGo images through the ``ddgs`` library, safe search on."""
 
     name = "duckduckgo"
 
-    def __init__(self, client: httpx.AsyncClient | None = None):
-        self.client = client
+    def __init__(self, ddgs_factory: Callable[[], Any] = DDGS):
+        self.ddgs_factory = ddgs_factory
+
+    def _rows(self, query: str, count: int) -> list[dict]:
+        with self.ddgs_factory() as ddgs:
+            return ddgs.images(query, safesearch="on", max_results=count) or []
 
     async def search(self, query: str, count: int) -> list[ImageResult]:
-        """Return up to ``count`` candidates with safe search on."""
-        client = self.client or httpx.AsyncClient()
-        headers = {"User-Agent": USER_AGENT, "Referer": DDG_HOME}
+        """Return up to ``count`` candidates; an empty list when nothing matched."""
         try:
-            page = await client.get(
-                DDG_HOME,
-                params={"q": query, "iax": "images", "ia": "images"},
-                headers=headers,
-                timeout=REQUEST_TIMEOUT_S,
-            )
-            match = _VQD.search(page.text)
-            if match is None:
-                raise ImageSearchError(
-                    "DuckDuckGo image search broke (no vqd token); set BRAVE_API_KEY"
-                )
-            resp = await client.get(
-                DDG_IMAGES,
-                params={
-                    "l": "wt-wt",
-                    "o": "json",
-                    "q": query,
-                    "vqd": match.group(1),
-                    "f": ",,,,,",
-                    "p": "1",
-                },
-                headers=headers,
-                timeout=REQUEST_TIMEOUT_S,
-            )
-            resp.raise_for_status()
-            body = resp.json()
-        except (httpx.HTTPError, ValueError) as exc:
+            rows = await asyncio.to_thread(self._rows, query, count)
+        except DDGSException as exc:
+            if NO_RESULTS in str(exc):
+                return []
             raise ImageSearchError(f"DuckDuckGo image search failed: {exc}") from exc
-        finally:
-            if self.client is None:
-                await client.aclose()
         results = []
-        for item in body.get("results") or []:
+        for item in rows:
             full, thumb = item.get("image") or "", item.get("thumbnail") or ""
             if full and thumb:
                 results.append(
@@ -154,4 +129,4 @@ def default_backend(
     key = api_key or os.environ.get("BRAVE_API_KEY", "").strip()
     if key:
         return BraveImageSearch(key, client)
-    return DuckDuckGoImageSearch(client)
+    return DuckDuckGoImageSearch()

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import yaml
+from ddgs.exceptions import DDGSException
 
 from kohakuterrarium.core.trigger_manager import TriggerManager
 from kohakuterrarium.modules.plugin.base import PluginBlockError
@@ -436,34 +437,54 @@ async def test_brave_backend_request_and_parse():
         await BraveImageSearch("KEY", failing).search("cat", 3)
 
 
-async def test_duckduckgo_backend_token_flow():
-    def handler(request):
-        if request.url.path == "/":
-            return httpx.Response(200, text="<script>vqd='4-12345'</script>")
-        assert request.url.params["vqd"] == "4-12345"
-        assert request.url.params["p"] == "1", "safe search on"
-        return httpx.Response(
-            200,
-            json={
-                "results": [
-                    {
-                        "image": "https://x.test/a.jpg",
-                        "thumbnail": "https://tse.test/a.jpg",
-                        "title": "A",
-                        "url": "https://x.test/",
-                    }
-                ]
-            },
-        )
+class _FakeDDGS:
+    """Stands in for ``ddgs.DDGS``: records calls, returns rows or raises."""
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    results = await DuckDuckGoImageSearch(client).search("cat", 4)
-    assert results[0].url == "https://x.test/a.jpg"
-    broken = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda r: httpx.Response(200, text="no token"))
-    )
+    calls: list[tuple[str, dict]] = []
+
+    def __init__(self, rows=None, error=None):
+        self.rows, self.error = rows or [], error
+
+    def __call__(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def images(self, query, **kwargs):
+        _FakeDDGS.calls.append((query, kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.rows
+
+
+async def test_duckduckgo_backend_uses_ddgs_with_safe_search():
+    _FakeDDGS.calls.clear()
+    row = {
+        "image": "https://x.test/a.jpg",
+        "thumbnail": "https://tse.test/a.jpg",
+        "title": "A",
+        "url": "https://x.test/",
+    }
+    fake = _FakeDDGS([row, {"image": "", "thumbnail": "https://t/b.jpg"}])
+    results = await DuckDuckGoImageSearch(ddgs_factory=fake).search("cat", 4)
+    assert [(r.url, r.thumbnail, r.title, r.source) for r in results] == [
+        ("https://x.test/a.jpg", "https://tse.test/a.jpg", "A", "https://x.test/")
+    ]
+    query, kwargs = _FakeDDGS.calls[-1]
+    assert query == "cat" and kwargs["safesearch"] == "on"
+    assert kwargs["max_results"] == 4
+
+
+async def test_duckduckgo_no_results_is_empty_and_failures_raise():
+    empty = _FakeDDGS(error=DDGSException("No results found."))
+    assert await DuckDuckGoImageSearch(ddgs_factory=empty).search("zzz", 4) == []
+    broken = _FakeDDGS(error=DDGSException("Ratelimit"))
     with pytest.raises(ImageSearchError, match="DuckDuckGo"):
-        await DuckDuckGoImageSearch(broken).search("cat", 4)
+        await DuckDuckGoImageSearch(ddgs_factory=broken).search("cat", 4)
 
 
 def test_default_backend_prefers_brave(monkeypatch):
