@@ -1,0 +1,58 @@
+# A QQ chat member with no built-in character.
+#
+# Run:   kt run @kt-qqbot/creatures/qq-group-chat   (or start it from kt serve)
+# Login: kt-qqbot login
+# Character: put character.md (and optional character/*.md) in
+#            ~/.kohakuterrarium/qq-bot/ ; the qq_character plugin adds them.
+
+name: qq-group-chat
+version: "0.1.0"
+
+controller:
+  llm: "${KT_LLM_PROFILE:}"
+  tool_format: native
+  ephemeral: false
+  max_messages: 0
+
+system_prompt_file: prompts/system.md
+
+# QQ chat arrives through the qq_feed trigger, not through input.
+input:
+  type: none
+
+# Plain text is private thought: it shows in the console / dashboard only.
+output:
+  type: stdout
+
+triggers:
+  - name: qq_feed
+    type: package
+    module: kt_qqbot.trigger
+    class: QQFeedTrigger
+    conversations: all
+    wake: ambient
+    quiet_period: 20
+    every_n: 8
+    cooldown: 60
+    batch_delay: 1.0
+    backfill: 20
+
+tools:
+  - name: qq_send
+    type: package
+    module: kt_qqbot.tools
+    class: QQSendTool
+  - name: qq_history
+    type: package
+    module: kt_qqbot.tools
+    class: QQHistoryTool
+
+plugins:
+  - name: qq_character
+    type: package
+    module: kt_qqbot.plugins.character
+    class: QQCharacterPlugin
+  - name: qq_status
+    type: package
+    module: kt_qqbot.plugins.status
+    class: QQStatusPlugin

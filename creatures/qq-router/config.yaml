@@ -1,0 +1,30 @@
+# One creature per QQ chat.
+#
+# This creature never talks itself. Its qq_router plugin adds one creature,
+# built from `template`, for every QQ chat (stable id qq-<appid>-<kind>-<openid>),
+# so each chat has its own context and session. Run it inside kt serve
+# (or `kt run`); both host creatures in a Terrarium engine.
+#
+# For one shared creature across all chats, run qq-group-chat directly instead.
+
+name: qq-router
+version: "0.1.0"
+
+controller:
+  llm: "${KT_LLM_PROFILE:}"
+  tool_format: native
+
+input:
+  type: none
+
+output:
+  type: stdout
+
+plugins:
+  - name: qq_router
+    type: package
+    module: kt_qqbot.plugins.router
+    class: QQRouterPlugin
+    options:
+      template: "@kt-qqbot/creatures/qq-group-chat"
+      conversations: all
