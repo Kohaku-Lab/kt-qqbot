@@ -1,0 +1,86 @@
+.qq-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: var(--kt-fs-body);
+}
+.qq-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.qq-muted {
+  opacity: 0.7;
+  font-size: 0.85em;
+}
+.qq-badge {
+  padding: 0 0.4em;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+  font-size: 0.8em;
+}
+.qq-badge.ok {
+  color: #2f9e44;
+  border-color: #2f9e44;
+}
+.qq-badge.bad {
+  color: #e03131;
+  border-color: #e03131;
+}
+.qq-qr {
+  width: 200px;
+  height: 200px;
+  background: #fff;
+  padding: 6px;
+  border-radius: 4px;
+}
+.qq-input {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+}
+.qq-button {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.qq-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.qq-chat {
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.4rem;
+}
+.qq-line {
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.qq-bubble {
+  align-self: flex-end;
+  max-width: 90%;
+  padding: 0.4rem 0.6rem;
+  border-radius: 10px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+}
+.qq-bubble.failed {
+  border-color: #e03131;
+}
+.qq-thumb {
+  max-width: 120px;
+  max-height: 120px;
+  border-radius: 4px;
+}
