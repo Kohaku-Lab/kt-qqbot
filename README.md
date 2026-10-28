@@ -95,6 +95,7 @@ option must match `qq_character`'s `directory` if you moved the folder.
 | `max_delivery` | `100` | most lines per chat in one delivery; older ones become "N earlier messages not shown; use qq_history" |
 | `unseen_history` | `backfill` | `backfill`: undelivered messages from before the feed started show as history; `new`: as new chat |
 | `hold` | `true` | `qq_send` returns chat that arrived meanwhile instead of sending, once |
+| `mid_turn` | `true` | chat that arrives while the creature is in a turn is folded into that turn before its next model call |
 | `typing` | `false` | send the private-chat typing indicator on wake (uses a reply slot) |
 | `images` / `image_detail` / `max_images` | `true` / `auto` / `8` | inbound images as vision input |
 | `subscriber` | the host creature's id (from core `bind_host`) | cursor key; set it only to share or pin a cursor |
@@ -189,8 +190,8 @@ low-detail previews, so the creature looks before it sends. Backends:
 
 - **Brave Search API** when `BRAVE_API_KEY` is set (or the `api_key` tool
   option), images endpoint with `safesearch=strict`;
-- otherwise **DuckDuckGo** images, unofficial and best effort (it needs a page
-  token first and can break; the tool then says so).
+- otherwise **DuckDuckGo** images through the `ddgs` library (the one core
+  `web_search` uses), safe search on; no key needed.
 
 Guards: https only; previews are fetched only from globally routable addresses,
 must be `image/*` and at most 1 MB; `blocklist` (domains, subdomains included);
