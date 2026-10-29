@@ -16,7 +16,7 @@ from typing import Any
 
 from kohakuterrarium.utils.logging import get_logger
 
-from kt_qqbot.api import MSG_INPUT_NOTIFY, MSG_MEDIA, MSG_TEXT, QQApi
+from kt_qqbot.api import MSG_INPUT_NOTIFY, MSG_MARKDOWN, MSG_MEDIA, MSG_TEXT, QQApi
 from kt_qqbot.auth.credentials import Credentials, CredentialStore
 from kt_qqbot.errors import BotInUse, CredentialsMissing, GatewayFatal, QQApiError
 from kt_qqbot.filelock import FileLock
@@ -355,18 +355,20 @@ class QQHub:
         by: str = "",
         reply_to_seq: int | None = None,
         media: "list[MediaItem] | tuple[MediaItem, ...]" = (),
-        mention_format: str = "native",
+        mention_format: str = "plain",
     ) -> SendResult:
         """Send text, then each media item, as separate messages in order.
 
         Every message takes its own passive-reply slot. The quote, if any,
-        goes on the first message. A failure stops the rest. In groups,
-        ``@<alias>`` of a known member goes out as a native mention unless
-        ``mention_format`` is ``"plain"``; the stored copy keeps the alias.
+        goes on the first message. A failure stops the rest. With
+        ``mention_format="markdown"``, group text goes out as a markdown
+        message and ``@<alias>`` of a known member becomes a native mention
+        (the bot needs QQ markdown permission); the stored copy keeps the alias.
         """
         kind, openid = split_conv_id(cid)
         wire_text = text
-        if kind == "group" and mention_format != "plain":
+        markdown = kind == "group" and mention_format == "markdown"
+        if markdown:
             wire_text = native_mentions(text, self.store.members(cid))
         await self.refresh_credentials()
         if self.unbound:
@@ -392,8 +394,7 @@ class QQHub:
                     cid,
                     kind,
                     openid,
-                    content=wire_text if item is None else "",
-                    msg_type=MSG_TEXT if item is None else MSG_MEDIA,
+                    **self._text_or_media(wire_text, item, markdown),
                     reference_id=reference,
                     media_file_info=file_info,
                 )
@@ -412,6 +413,15 @@ class QQHub:
             reference = None
             self._notify("sent", cid)
         return SendResult(True, seqs=tuple(seqs), passive=True)
+
+    @staticmethod
+    def _text_or_media(text: str, item: "MediaItem | None", markdown: bool) -> dict:
+        """Message fields for one text or media message."""
+        if item is not None:
+            return {"content": "", "msg_type": MSG_MEDIA}
+        if markdown:
+            return {"msg_type": MSG_MARKDOWN, "extra": {"markdown": {"content": text}}}
+        return {"content": text, "msg_type": MSG_TEXT}
 
     async def _send_on_slot(
         self, cid: str, kind: str, openid: str, **message: Any

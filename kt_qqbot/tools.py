@@ -136,9 +136,9 @@ class QQSendTool(BaseTool):
         super().__init__(config)
         self.max_chars = int(options.get("max_chars", MAX_MESSAGE_CHARS))
         self.allow_group_files = bool(options.get("allow_group_files", False))
-        self.mention_format = str(options.get("mention_format", "native"))
-        if self.mention_format not in ("native", "plain"):
-            raise ValueError("mention_format must be 'native' or 'plain'")
+        self.mention_format = str(options.get("mention_format", "plain"))
+        if self.mention_format not in ("markdown", "plain"):
+            raise ValueError("mention_format must be 'markdown' or 'plain'")
         self.sticker_directory = options.get("sticker_directory")
         character_dir = options.get("character_directory")
         self.character_directory = (

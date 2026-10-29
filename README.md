@@ -142,10 +142,12 @@ message uses one passive-reply slot. `media_type` (`image`, `video`, `voice`,
 
 `qq_send` options: `max_chars` (default 2000), `allow_group_files` (default
 false), `media_roots` (extra folders local media may come from; by default only
-the creature's working folder, symlinks resolved), `mention_format` (`native`
-by default: in groups, `@<name>` of a known member is sent as
-`<qqbot-at-user id="…" />`; set `plain` to send it as text if your client shows
-the raw tag; a name two members share always stays text).
+the creature's working folder, symlinks resolved), `mention_format` (`plain`
+by default: `@<name>` is sent as text, because QQ shows the native mention tag
+raw in plain-text messages; set `markdown` if your bot has QQ markdown
+permission: group text is then sent as a markdown message and `@<name>` of a
+known member becomes a real mention, `<qqbot-at-user id="…" />`; a name two
+members share always stays text).
 
 Mentions of other members in incoming messages show in the feed as `@<name>`.
 

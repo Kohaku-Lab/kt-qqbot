@@ -230,15 +230,28 @@ class TestOutboundMentions:
             ),
         )
 
-    async def test_known_member_becomes_a_native_mention(self, make_hub, fake_api):
+    async def test_default_mentions_stay_plain_text(self, make_hub, fake_api):
+        hub = make_hub()
+        await self._group_with_members(hub)
+        result = await hub.send("group:G1", "@琥珀青葉 你說得對")
+        assert result.sent
+        body = fake_api.sent()[-1]
+        assert body["msg_type"] == 0 and body["content"] == "@琥珀青葉 你說得對"
+        assert "markdown" not in body, "plain text groups show the tag raw"
+        await hub.close()
+
+    async def test_markdown_format_sends_native_mentions(self, make_hub, fake_api):
         hub = make_hub()
         await self._group_with_members(hub)
         result = await hub.send(
-            "group:G1", "@琥珀青葉 你說得對, @琥珀 也是, @nobody 不是"
+            "group:G1",
+            "@琥珀青葉 你說得對, @琥珀 也是, @nobody 不是",
+            mention_format="markdown",
         )
         assert result.sent
-        wire = fake_api.sent()[-1]["content"]
-        assert wire == (
+        body = fake_api.sent()[-1]
+        assert body["msg_type"] == 2 and body["content"] == ""
+        assert body["markdown"]["content"] == (
             '<qqbot-at-user id="P1" /> 你說得對, '
             '<qqbot-at-user id="P2" /> 也是, @nobody 不是'
         )
@@ -246,7 +259,7 @@ class TestOutboundMentions:
         assert stored["content"] == "@琥珀青葉 你說得對, @琥珀 也是, @nobody 不是"
         await hub.close()
 
-    async def test_plain_format_private_chats_and_shared_names_stay_text(
+    async def test_markdown_skips_private_chats_and_shared_names(
         self, make_hub, fake_api
     ):
         hub = make_hub()
@@ -261,13 +274,12 @@ class TestOutboundMentions:
                 author={"member_openid": "P3", "username": "琥珀"},
             ),
         )
-        await hub.send("group:G1", "@琥珀 hi")
+        await hub.send("group:G1", "@琥珀 hi", mention_format="markdown")
         assert (
-            fake_api.sent()[-1]["content"] == "@琥珀 hi"
+            fake_api.sent()[-1]["markdown"]["content"] == "@琥珀 hi"
         ), "two members share the name"
-        await hub.send("group:G1", "@琥珀青葉 hi", mention_format="plain")
-        assert fake_api.sent()[-1]["content"] == "@琥珀青葉 hi"
         await hub.on_dispatch(EVENT_C2C, c2c_event("C1", "U1", "hello"))
-        await hub.send("c2c:U1", "@琥珀青葉 hi")
-        assert fake_api.sent()[-1]["content"] == "@琥珀青葉 hi"
+        await hub.send("c2c:U1", "@琥珀青葉 hi", mention_format="markdown")
+        body = fake_api.sent()[-1]
+        assert body["msg_type"] == 0 and body["content"] == "@琥珀青葉 hi"
         await hub.close()
