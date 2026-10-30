@@ -13,10 +13,10 @@ import weakref
 from pathlib import Path
 from typing import Any
 
-from kohakuterrarium.core.config import load_agent_config
+from kohakuterrarium.core.config.load import load_agent_config
 from kohakuterrarium.modules.plugin.base import BasePlugin, PluginContext
-from kohakuterrarium.terrarium.autosession import default_session_dir
-from kohakuterrarium.terrarium.channels import TERRARIUM_ENGINE_KEY
+from kohakuterrarium.terrarium.channels.channels import TERRARIUM_ENGINE_KEY
+from kohakuterrarium.terrarium.session.autosession import default_session_dir
 from kohakuterrarium.utils.logging import get_logger
 
 from kt_qqbot import access

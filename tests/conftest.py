@@ -140,6 +140,14 @@ def make_hub(fake_api, tmp_path):
     return _make
 
 
+def symlink_or_skip(link, target) -> None:
+    """Create a symlink, or skip the test where the OS refuses symlinks."""
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks need privileges on this OS")
+
+
 def c2c_event(msg_id: str, openid: str, content: str, **extra) -> dict:
     """Return a ``C2C_MESSAGE_CREATE`` payload."""
     return {

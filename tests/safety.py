@@ -1,8 +1,8 @@
 """Fail-closed test guard: no real LLM provider, no real credentials, no real network.
 
-* Every LLM factory the core calls is replaced by a ScriptedLLM factory, and
-  ``BaseLLMProvider.__init__`` raises, so a missed factory still cannot build a
-  real provider.
+* Provider factories and real-provider construction are handled by the core's
+  ``kohakuterrarium.testing.llm_seam``; every provider subclass is blocked, not
+  only the base class.
 * Credential paths that the core freezes at import time are pointed into tmp,
   and an audit hook refuses to open anything under the real home's
   credential folders.
@@ -15,19 +15,18 @@ import socket
 import sys
 from pathlib import Path
 
-import kohakuterrarium.bootstrap.agent_init as agent_init_mod
-import kohakuterrarium.bootstrap.llm as bootstrap_llm_mod
-import kohakuterrarium.core.agent_compact as agent_compact_mod
-import kohakuterrarium.core.agent_model as agent_model_mod
-import kohakuterrarium.llm.api_keys as api_keys_mod
-import kohakuterrarium.llm.anthropic_provider  # noqa: F401
-import kohakuterrarium.llm.backends as backends_mod
-import kohakuterrarium.llm.codex_auth as codex_auth_mod
-import kohakuterrarium.llm.codex_provider  # noqa: F401
-import kohakuterrarium.llm.openai  # noqa: F401
-import kohakuterrarium.studio.sessions.summary.tracking as summary_mod
+import kohakuterrarium.llm.codex.auth as codex_auth_mod
+import kohakuterrarium.llm.profiles.api_keys as api_keys_mod
+import kohakuterrarium.llm.profiles.backends as backends_mod
+import kohakuterrarium.studio.identity.mcp.servers as mcp_servers_mod
+import kohakuterrarium.studio.identity.ui_prefs as ui_prefs_mod
 from kohakuterrarium.llm.base import BaseLLMProvider
 from kohakuterrarium.testing.llm import ScriptedLLM
+from kohakuterrarium.testing.llm_seam import (
+    RealProviderBlocked,
+    forbid_real_providers,
+    install_llm_seam,
+)
 
 REAL_HOME = Path(os.path.expanduser("~")).resolve()
 SECRET_DIRS = tuple(
@@ -49,10 +48,6 @@ ALLOWED_DIRS = (str(REAL_HOME / ".kohakuterrarium" / "logs"),)
 LOOPBACK_NAMES = {"localhost", "127.0.0.1", "::1", "ip6-localhost"}
 
 _active = {"on": False, "network": True}
-
-
-class RealProviderBlocked(RuntimeError):
-    """A test tried to build a real LLM provider."""
 
 
 class GuardViolation(PermissionError):
@@ -102,12 +97,6 @@ def _audit(event: str, args: tuple) -> None:
 sys.addaudithook(_audit)
 
 
-def _blocked_provider_init(self, *args, **kwargs):
-    raise RealProviderBlocked(
-        f"{type(self).__name__} is a real LLM provider; tests must use ScriptedLLM"
-    )
-
-
 def _provider_classes() -> list[type]:
     """Return BaseLLMProvider and every subclass loaded so far."""
     found, todo = [], [BaseLLMProvider]
@@ -118,42 +107,35 @@ def _provider_classes() -> list[type]:
     return found
 
 
-def _scripted(*args, **kwargs):
+def _scripted() -> ScriptedLLM:
     return ScriptedLLM(["(scripted)"])
-
-
-FACTORIES = (
-    (bootstrap_llm_mod, "create_llm_provider"),
-    (agent_init_mod, "create_llm_provider"),
-    (bootstrap_llm_mod, "create_llm_from_profile_name"),
-    (agent_model_mod, "create_llm_from_profile_name"),
-    (agent_compact_mod, "create_llm_from_profile_name"),
-    (summary_mod, "create_llm_from_profile_name"),
-)
 
 
 def install(monkeypatch, tmp_path: Path, *, network: bool = True) -> None:
     """Patch every factory, credential path and the network for one test."""
-    for module, name in FACTORIES:
-        monkeypatch.setattr(module, name, _scripted)
-    for cls in _provider_classes():
-        monkeypatch.setattr(cls, "__init__", _blocked_provider_init)
+    install_llm_seam(monkeypatch, _scripted)
+    classes = _provider_classes()
+    forbid_real_providers(
+        lambda _base, name, blocked: [
+            monkeypatch.setattr(cls, name, blocked) for cls in classes
+        ]
+    )
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
+    kt_dir = home / ".kohakuterrarium"
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setattr(
         codex_auth_mod, "CODEX_CLI_TOKEN_PATH", home / ".codex" / "auth.json"
     )
     monkeypatch.setattr(
-        codex_auth_mod,
-        "DEFAULT_TOKEN_PATH",
-        home / ".kohakuterrarium" / "codex-auth.json",
+        codex_auth_mod, "DEFAULT_TOKEN_PATH", kt_dir / "codex-auth.json"
     )
-    monkeypatch.setattr(api_keys_mod, "KT_DIR", home / ".kohakuterrarium")
-    monkeypatch.setattr(
-        backends_mod, "PROFILES_PATH", home / ".kohakuterrarium" / "llm_profiles.yaml"
-    )
+    monkeypatch.setattr(api_keys_mod, "KT_DIR", kt_dir)
+    monkeypatch.setattr(backends_mod, "PROFILES_PATH", kt_dir / "llm_profiles.yaml")
+    monkeypatch.setattr(ui_prefs_mod, "KT_DIR", kt_dir)
+    monkeypatch.setattr(mcp_servers_mod, "KT_DIR", kt_dir)
     for var in (
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
@@ -169,3 +151,12 @@ def uninstall() -> None:
     """Turn the audit hook's checks off after a test."""
     _active["on"] = False
     _active["network"] = True
+
+
+__all__ = [
+    "GuardViolation",
+    "REAL_HOME",
+    "RealProviderBlocked",
+    "install",
+    "uninstall",
+]
