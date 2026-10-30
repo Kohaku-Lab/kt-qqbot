@@ -43,20 +43,22 @@ def test_every_core_factory_target_is_replaced():
 
 def test_real_credentials_are_unreadable():
     with pytest.raises(GuardViolation):
-        open(REAL_HOME / ".codex" / "auth.json")
+        open(REAL_HOME / ".codex" / "auth.json", encoding="utf-8")
     with pytest.raises(GuardViolation):
-        (REAL_HOME / ".kohakuterrarium" / "llm_profiles.yaml").read_text()
+        (REAL_HOME / ".kohakuterrarium" / "llm_profiles.yaml").read_text(
+            encoding="utf-8"
+        )
     assert CodexTokens.load() is None, "token search stays in tmp"
 
 
 def test_credential_check_is_the_guard_not_the_filesystem():
     probe = REAL_HOME / ".codex" / "guard-probe-does-not-exist.json"
     with pytest.raises(GuardViolation):
-        open(probe)
+        open(probe, encoding="utf-8")
     safety._active["on"] = False
     try:
         with pytest.raises(FileNotFoundError):
-            open(probe)
+            open(probe, encoding="utf-8")
     finally:
         safety._active["on"] = True
 
