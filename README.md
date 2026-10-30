@@ -22,9 +22,10 @@ speak.
 
 ## Install
 
-Requires KohakuTerrarium newer than 2.1.8: the first core with the UI
-extension system and the `path_arguments`, trigger `bind_host` and
-`host_resources_allowed` hooks this package relies on.
+Requires KohakuTerrarium 2.2.0 or newer (below 3.0.0): the first core with the
+refactored module layout this package imports, on top of the UI extension
+system and the `path_arguments`, trigger `bind_host` and
+`host_resources_allowed` hooks it relies on.
 
 ```bash
 kt install https://github.com/Kohaku-Lab/kt-qqbot
