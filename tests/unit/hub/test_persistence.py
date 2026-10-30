@@ -267,6 +267,7 @@ async def test_single_creature_resumes_with_history_and_one_feed(
     feeds = feeds_of(resumed.agent)
     assert len(feeds) == 1 and len(resumed.agent.trigger_manager.list()) == 1
     hub = hub_registry.running_hubs()[APP_ID]
+    await _until(lambda: hub._refs == 1)
     assert hub._refs == 1
     assert "first turn" in _user_texts(resumed.agent)[0]
     await hub.on_dispatch(EVENT_C2C, c2c_event("B", "U1", "after resume"))
@@ -313,9 +314,12 @@ async def test_router_reattaches_each_chat_session(tmp_path, monkeypatch, fake_a
     engine, router = await run_router()
     await _until(lambda: cid in engine)
     chat = engine.get_creature(cid)
+    await _until(lambda: len(_user_texts(chat.agent)) >= 1)
     assert "remember me" in _user_texts(chat.agent)[0], "history came back"
+    await _until(lambda: len(feeds_of(chat.agent)) == 1)
     assert len(feeds_of(chat.agent)) == 1
     hub = hub_registry.running_hubs()[APP_ID]
+    await _until(lambda: hub._refs == 2)
     assert hub._refs == 2, "router + one chat creature"
     await hub.on_dispatch(EVENT_GROUP, group_event("G2", "G1", "P", "new one"))
     await _until(lambda: len(_user_texts(chat.agent)) == 2)
