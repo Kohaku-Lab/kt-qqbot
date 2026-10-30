@@ -163,6 +163,11 @@ Mentions of other members in incoming messages show in the feed as `@<name>`.
 Creature ids are `qq-<appid>-<c2c|group>-<openid>` (safe as file names). Its
 creatures read pending chat as new (`unseen_history: new`).
 
+The router adds and re-adopts chat creatures in background tasks. Code that
+drives it directly (tests, tooling) calls `await router.wait_idle()` to know when
+every spawn started so far has finished; until then a chat creature may be in the
+engine without its history, feeds or hub reference.
+
 ### `qq_character` plugin
 
 `directory` (default `~/.kohakuterrarium/qq-bot`), `heading` (`Character`),
