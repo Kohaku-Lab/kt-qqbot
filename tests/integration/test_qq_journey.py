@@ -223,14 +223,14 @@ async def test_router_journey(tmp_path, monkeypatch, fake_api):
 
     # Restart on the SAME session dir: chats come back with their history.
     engine2 = Terrarium(session_dir=str(tmp_path / "sessions"))
-    await engine2.add_creature(str(router_path))
-    await _until(lambda: c2c_id in engine2 and group_id in engine2)
+    router_host = await engine2.add_creature(str(router_path))
+    await router_host.agent.plugins.get_plugin("qq_router").wait_idle()
+    assert c2c_id in engine2 and group_id in engine2
     hub2 = hub_registry.running_hubs()[APP_ID]
     assert hub2.bot_id == "BOTJ" and hub2.bot_identity["username"] == "kt-journey"
     meta = hub2.store.conv_meta("c2c:U1")
     assert meta["first_seen"] == first_meta["first_seen"] and meta["kind"] == "c2c"
     assert hub2.store.handle("c2c:U1") == "u_u1"
-    await _until(lambda: hub2._refs == 3)
     assert hub2._refs == 3, "router + two chat creatures, one ref each"
     restored_chat = engine2.get_creature(c2c_id)
     assert len(feeds_of(restored_chat.agent)) == 1

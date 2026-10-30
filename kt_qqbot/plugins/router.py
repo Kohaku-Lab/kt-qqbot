@@ -115,6 +115,11 @@ class QQRouterPlugin(BasePlugin):
             self._owned = False
             await hub_registry.release(hub)
 
+    async def wait_idle(self) -> None:
+        """Return once every background spawn started so far has finished."""
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
     def _on_new(self, cid: str) -> None:
         task = asyncio.create_task(self.spawn(cid))
         self._tasks.add(task)
