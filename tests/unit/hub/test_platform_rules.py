@@ -121,11 +121,13 @@ async def test_debug_raw_events_capture(make_hub):
         await hub.on_dispatch(EVENT_C2C, c2c_event(f"R{i}", "U", f"raw {i}"))
     files = list((root_dir() / "debug").glob("raw-*.jsonl"))
     assert len(files) == 1
-    assert stat.S_IMODE(os.stat(files[0]).st_mode) == 0o600
-    lines = [json.loads(x) for x in files[0].read_text().splitlines()]
+    if os.name == "posix":
+        assert stat.S_IMODE(os.stat(files[0]).st_mode) == 0o600
+    text = files[0].read_text(encoding="utf-8")
+    lines = [json.loads(x) for x in text.splitlines()]
     assert [x["t"] for x in lines] == [EVENT_C2C, EVENT_C2C]
     assert lines[0]["d"]["content"] == "raw 0" and set(lines[0]) == {"t", "d"}
-    assert "tok" not in files[0].read_text()
+    assert "tok" not in text
     await hub.close()
 
 

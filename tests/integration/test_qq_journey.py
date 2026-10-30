@@ -230,6 +230,7 @@ async def test_router_journey(tmp_path, monkeypatch, fake_api):
     meta = hub2.store.conv_meta("c2c:U1")
     assert meta["first_seen"] == first_meta["first_seen"] and meta["kind"] == "c2c"
     assert hub2.store.handle("c2c:U1") == "u_u1"
+    await _until(lambda: hub2._refs == 3)
     assert hub2._refs == 3, "router + two chat creatures, one ref each"
     restored_chat = engine2.get_creature(c2c_id)
     assert len(feeds_of(restored_chat.agent)) == 1

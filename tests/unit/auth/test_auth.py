@@ -46,8 +46,8 @@ class TestCredentialStore:
         store = CredentialStore(tmp_path / "c.json")
         store.save(Credentials("1", "a"))
         store.save(Credentials("2", "hidden-b"), make_default=False)
-        mode = stat.S_IMODE(os.stat(store.path).st_mode)
-        assert mode == 0o600
+        if os.name == "posix":
+            assert stat.S_IMODE(os.stat(store.path).st_mode) == 0o600
         assert store.load() == Credentials("1", "a")
         assert store.load("2") == Credentials("2", "hidden-b")
         assert store.list_app_ids() == ["1", "2"]

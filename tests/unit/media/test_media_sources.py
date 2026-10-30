@@ -30,8 +30,8 @@ from kt_qqbot.stickers import StickerLibrary
 from kt_qqbot.tools import QQSendTool
 from kt_qqbot.trigger import QQFeedTrigger
 
-from tests.conftest import c2c_event, group_event
-from tests.unit.test_review_fixes import ROOT
+from tests.conftest import c2c_event, group_event, symlink_or_skip
+from tests.unit.hub.test_review_fixes import ROOT
 
 pytestmark = pytest.mark.timeout(30)
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
@@ -226,7 +226,7 @@ def test_sticker_library_search_and_resolve(tmp_path):
         with pytest.raises(ValueError):
             lib.resolve(bad)
     (tmp_path / "secret.png").write_bytes(PNG)
-    (tmp_path / "stickers" / "link.png").symlink_to(tmp_path / "secret.png")
+    symlink_or_skip(tmp_path / "stickers" / "link.png", tmp_path / "secret.png")
     with pytest.raises(ValueError, match="outside"):
         lib.resolve("link.png")
 
@@ -529,11 +529,15 @@ async def test_web_guard_blocks_private_fetches(monkeypatch):
 
 
 def test_example_creature_has_web_tools():
-    config = yaml.safe_load((ROOT / "creatures/qq-group-chat/config.yaml").read_text())
+    config = yaml.safe_load(
+        (ROOT / "creatures/qq-group-chat/config.yaml").read_text(encoding="utf-8")
+    )
     names = {t["name"] for t in config["tools"]}
     assert {"web_search", "web_fetch", "qq_sticker", "qq_image_search"} <= names
     assert any(p["name"] == "qq_web_guard" for p in config["plugins"])
-    prompt = (ROOT / "creatures/qq-group-chat/prompts/system.md").read_text()
+    prompt = (ROOT / "creatures/qq-group-chat/prompts/system.md").read_text(
+        encoding="utf-8"
+    )
     assert "40054010" in prompt or "never paste links" in prompt.lower()
 
 

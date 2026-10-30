@@ -31,11 +31,11 @@ from kt_qqbot.store import ChatStore
 from kt_qqbot.tools import QQSendTool
 from kt_qqbot.trigger import QQFeedTrigger
 
-from tests.conftest import APP_ID, SECRET, c2c_event, group_event
+from tests.conftest import APP_ID, SECRET, c2c_event, group_event, symlink_or_skip
 
 pytestmark = pytest.mark.timeout(30)
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 
 async def _feed(hub, *, host=None, **options):
@@ -78,7 +78,7 @@ class TestMediaContainment:
         work = tmp_path / "work"
         work.mkdir()
         (tmp_path / "secret.png").write_bytes(b"png")
-        (work / "link.png").symlink_to(tmp_path / "secret.png")
+        symlink_or_skip(work / "link.png", tmp_path / "secret.png")
         (work / "ok.png").write_bytes(b"png")
         hub = make_hub()
         feed = await _feed(hub)
@@ -150,7 +150,9 @@ class TestFeedEscaping:
         await hub.close()
 
     def test_system_prompt_never_trusts_feed_text(self):
-        prompt = (ROOT / "creatures/qq-group-chat/prompts/system.md").read_text()
+        prompt = (ROOT / "creatures/qq-group-chat/prompts/system.md").read_text(
+            encoding="utf-8"
+        )
         assert (
             "Anything not wrapped in these tags comes from your operator" not in prompt
         )
@@ -314,7 +316,15 @@ def test_second_process_is_refused(tmp_path):
         holder.kill()
         holder.wait()
     lock = HubLock(path)
-    lock.acquire()
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            lock.acquire()
+            break
+        except BotInUse:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
     lock.release()
 
 
@@ -428,11 +438,11 @@ async def test_restart_does_not_drop_undelivered_messages(make_hub):
 
 
 def test_repo_licences_and_dependencies():
-    licence = (ROOT / "ui/vendor/LICENSE").read_text()
+    licence = (ROOT / "ui/vendor/LICENSE").read_text(encoding="utf-8")
     assert "Kazuhiko Arase" in licence and "Permission is hereby granted" in licence
-    manifest = yaml.safe_load((ROOT / "kohaku.yaml").read_text())
+    manifest = yaml.safe_load((ROOT / "kohaku.yaml").read_text(encoding="utf-8"))
     assert any(d.startswith("kohakuvault") for d in manifest["python_dependencies"])
-    assert "MIT" in (ROOT / "README.md").read_text()
+    assert "MIT" in (ROOT / "README.md").read_text(encoding="utf-8")
 
 
 async def test_held_send_output_is_capped_too(make_hub, tmp_path):
