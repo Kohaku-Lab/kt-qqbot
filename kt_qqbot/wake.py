@@ -27,15 +27,23 @@ class WakePolicy:
     """Wake rule for one feed.
 
     ``mention`` wakes only on direct messages. ``all`` wakes on any message.
-    ``ambient`` wakes on direct messages at once; otherwise once ``every_n``
-    messages are pending, or the chat has been quiet for ``quiet_period``
-    seconds, but never sooner than ``cooldown`` after the last ambient wake.
+    ``ambient`` wakes on direct messages at once, and flushes every pending
+    message with them. Otherwise it debounces: after the newest message it
+    waits ``max(quiet_period * decay ** (pending - 1), min_wait)`` seconds, and
+    never longer than ``max_wait`` after the first pending message. Two ambient
+    wakes in one chat are at least ``cooldown`` seconds apart.
     """
 
     mode: WakeMode = "ambient"
-    quiet_period: float = 20.0
-    every_n: int = 8
-    cooldown: float = 60.0
+    quiet_period: float = 10.0
+    decay: float = 0.5
+    min_wait: float = 2.0
+    max_wait: float = 30.0
+    cooldown: float = 15.0
+
+    def debounce(self, count: int) -> float:
+        """Return how long the chat must stay quiet with ``count`` messages pending."""
+        return max(self.quiet_period * self.decay ** max(count - 1, 0), self.min_wait)
 
     def decide(
         self, pending: list[dict], now: float, last_ambient: float | None
@@ -43,20 +51,26 @@ class WakePolicy:
         """Return the decision for one conversation's pending messages."""
         if not pending:
             return WakeDecision("idle")
-        newest = max(float(m.get("recv") or m.get("ts") or now) for m in pending)
+        arrivals = [float(m.get("recv") or m.get("ts") or now) for m in pending]
         return self.decide_summary(
-            len(pending), any(is_direct(m) for m in pending), newest, now, last_ambient
+            len(pending),
+            any(is_direct(m) for m in pending),
+            min(arrivals),
+            max(arrivals),
+            now,
+            last_ambient,
         )
 
     def decide_summary(
         self,
         count: int,
         direct: bool,
+        first: float,
         newest: float,
         now: float,
         last_ambient: float | None,
     ) -> WakeDecision:
-        """Return the decision from a pending count, direct flag and newest arrival."""
+        """Return the decision from the pending count, direct flag and first and newest arrival."""
         if count <= 0:
             return WakeDecision("idle")
         if direct:
@@ -68,9 +82,7 @@ class WakePolicy:
                 return WakeDecision("wake")
         if last_ambient is not None and now - last_ambient < self.cooldown:
             return WakeDecision("wait", delay=self.cooldown - (now - last_ambient))
-        if count >= self.every_n:
+        due = min(newest + self.debounce(count), first + self.max_wait)
+        if now >= due:
             return WakeDecision("wake")
-        quiet_for = now - newest
-        if quiet_for >= self.quiet_period:
-            return WakeDecision("wake")
-        return WakeDecision("wait", delay=self.quiet_period - quiet_for)
+        return WakeDecision("wait", delay=due - now)

@@ -184,14 +184,48 @@ class TestWakePolicy:
         pending = self._pending(2)
         assert WakePolicy(mode="mention").decide(pending, 100.0, None).action == "idle"
         assert WakePolicy(mode="all").decide(pending, 100.0, None).action == "wake"
-        ambient = WakePolicy(quiet_period=20, every_n=3, cooldown=60)
+        ambient = WakePolicy(quiet_period=20, cooldown=60)
         wait = ambient.decide(pending, 105.0, None)
-        assert wait.action == "wait" and wait.delay == 15
+        assert wait.action == "wait" and wait.delay == 5
         assert ambient.decide(pending, 121.0, None).action == "wake"
-        assert ambient.decide(self._pending(3), 101.0, None).action == "wake"
         cooling = ambient.decide(self._pending(5), 130.0, 100.0)
         assert cooling.action == "wait" and cooling.delay == 30
         assert ambient.decide([], 100.0, None).action == "idle"
+
+    def test_ambient_wait_shrinks_with_each_pending_message(self):
+        policy = WakePolicy(quiet_period=10, decay=0.5, min_wait=2, max_wait=30)
+        assert [policy.debounce(n) for n in (1, 2, 3, 4, 5, 9)] == [
+            10,
+            5,
+            2.5,
+            2,
+            2,
+            2,
+        ]
+        one = policy.decide(self._pending(1), 103.0, None)
+        assert one.action == "wait" and one.delay == 7
+        assert policy.decide(self._pending(1), 110.0, None).action == "wake"
+        three = policy.decide(self._pending(3), 101.0, None)
+        assert three.action == "wait" and three.delay == 1.5
+        assert policy.decide(self._pending(3), 102.5, None).action == "wake"
+
+    def test_ambient_wait_never_passes_max_wait_from_the_first_message(self):
+        policy = WakePolicy(quiet_period=10, decay=0.5, min_wait=2, max_wait=30)
+        stream = [dict(m, recv=100.0 + 3 * i) for i, m in enumerate(self._pending(12))]
+        quiet = policy.decide(stream[:4], 110.0, None)
+        assert quiet.action == "wait" and quiet.delay == 1
+        late = policy.decide(stream[:11], 130.0, None)
+        assert late.action == "wake", "30s after the first message the buffer flushes"
+        pair = [stream[0], dict(stream[1], recv=129.0)]
+        capped = policy.decide(pair, 129.5, None)
+        assert capped.action == "wait" and capped.delay == 0.5, "capped by max_wait"
+
+    def test_direct_message_flushes_the_waiting_buffer(self):
+        policy = WakePolicy()
+        chatter = self._pending(3)
+        chatter.append(dict(_msg("group:G", "at", recv=100.5), mention=True))
+        decision = policy.decide(chatter, 100.6, 100.0)
+        assert decision.action == "wake" and decision.direct
 
 
 class TestRender:

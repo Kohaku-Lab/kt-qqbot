@@ -40,14 +40,15 @@ class _Pending:
 
     count: int = 0
     direct: bool = False
+    first: float = 0.0
     newest: float = 0.0
 
     def add(self, message: dict) -> None:
+        arrival = float(message.get("recv") or message.get("ts") or 0)
+        self.first = arrival if self.count == 0 else min(self.first, arrival)
         self.count += 1
         self.direct = self.direct or is_direct(message)
-        self.newest = max(
-            self.newest, float(message.get("recv") or message.get("ts") or 0)
-        )
+        self.newest = max(self.newest, arrival)
 
 
 class QQFeedTrigger(BaseTrigger):
@@ -84,9 +85,12 @@ class QQFeedTrigger(BaseTrigger):
         bot: str | None = None,
         conversations: str | list[str] = "all",
         wake: str = "ambient",
-        quiet_period: float = 6.0,
-        every_n: int = 5,
+        quiet_period: float = 10.0,
+        decay: float = 0.5,
+        min_wait: float = 2.0,
+        max_wait: float = 30.0,
         cooldown: float = 15.0,
+        every_n: int | None = None,  # ignored; feeds saved with it still load
         batch_delay: float = 0.5,
         backfill: int = 20,
         hold: bool = True,
@@ -107,7 +111,9 @@ class QQFeedTrigger(BaseTrigger):
             conversations=conversations,
             wake=wake,
             quiet_period=quiet_period,
-            every_n=every_n,
+            decay=decay,
+            min_wait=min_wait,
+            max_wait=max_wait,
             cooldown=cooldown,
             batch_delay=batch_delay,
             backfill=backfill,
@@ -128,7 +134,9 @@ class QQFeedTrigger(BaseTrigger):
         self.policy = WakePolicy(
             mode=wake,  # type: ignore[arg-type]
             quiet_period=float(quiet_period),
-            every_n=int(every_n),
+            decay=float(decay),
+            min_wait=float(min_wait),
+            max_wait=float(max_wait),
             cooldown=float(cooldown),
         )
         self.batch_delay = float(batch_delay)
@@ -358,6 +366,7 @@ class QQFeedTrigger(BaseTrigger):
             decision = self.policy.decide_summary(
                 summary.count,
                 summary.direct,
+                summary.first,
                 summary.newest,
                 now,
                 self._last_ambient.get(cid),

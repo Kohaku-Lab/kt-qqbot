@@ -87,9 +87,11 @@ option must match `qq_character`'s `directory` if you moved the folder.
 |---|---|---|
 | `bot` | default bot | AppID to use |
 | `conversations` | `all` | `all`, `c2c`, `groups`, or a list of chat handles / `group:<openid>` keys |
-| `wake` | `ambient` | `mention`: only private chat, @-mentions, replies to the bot. `all`: every message. `ambient`: direct messages at once, otherwise after `quiet_period` or `every_n` messages, never sooner than `cooldown` after the last ambient wake |
-| `quiet_period` | `6` | seconds of silence before an ambient wake |
-| `every_n` | `5` | pending messages that force an ambient wake |
+| `wake` | `ambient` | `mention`: only private chat, @-mentions, replies to the bot. `all`: every message. `ambient`: direct messages at once, and they flush every pending message of that chat; otherwise debounced (see `quiet_period`), never sooner than `cooldown` after the last ambient wake |
+| `quiet_period` | `10` | seconds of silence before an ambient wake when one message is pending |
+| `decay` | `0.5` | each further pending message multiplies the wait by this: `max(quiet_period * decay^(pending-1), min_wait)` |
+| `min_wait` | `2` | shortest wait after the newest message |
+| `max_wait` | `30` | longest an ambient message waits, counted from the first pending one |
 | `cooldown` | `15` | seconds between ambient wakes in one chat |
 | `batch_delay` | `0.5` | seconds to wait so a burst lands in one delivery |
 | `backfill` | `20` | on a chat's first delivery, how many messages from before the feed started to show as `<qq_backfill>` |

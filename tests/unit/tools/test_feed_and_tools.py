@@ -153,7 +153,7 @@ class TestFeedTrigger:
     async def test_ambient_waits_for_quiet_then_cools_down(self, make_hub):
         hub = make_hub()
         feed = await _feed(
-            hub, wake="ambient", quiet_period=0.2, every_n=50, cooldown=30
+            hub, wake="ambient", quiet_period=0.2, min_wait=0.05, cooldown=30
         )
         await hub.on_dispatch(EVENT_GROUP, group_event("A", "G", "P", "one"))
         start = time.monotonic()
@@ -433,6 +433,12 @@ class TestMidTurn:
 def test_feed_defaults_favor_low_latency():
     feed = QQFeedTrigger()
     policy = feed.policy
-    assert (policy.quiet_period, policy.every_n, policy.cooldown) == (6.0, 5, 15.0)
+    assert (
+        policy.quiet_period,
+        policy.decay,
+        policy.min_wait,
+        policy.max_wait,
+        policy.cooldown,
+    ) == (10.0, 0.5, 2.0, 30.0, 15.0)
     assert feed.batch_delay == 0.5 and feed.image_options.timeout == 5.0
     assert feed.to_resume_dict()["image_timeout"] == 5.0
