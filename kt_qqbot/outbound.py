@@ -116,11 +116,6 @@ async def _encode_silk(data: bytes) -> bytes:
     return await asyncio.to_thread(silkcoder.encode, data)
 
 
-async def to_silk(data: bytes) -> bytes:
-    """Return voice bytes as SILK, encoding other audio with the optional codec."""
-    return data if is_silk(data) else await _encode_silk(data)
-
-
 def split_text(text: str, limit: int) -> list[str]:
     """Split text longer than ``limit`` at paragraph, line, sentence or space boundaries.
 

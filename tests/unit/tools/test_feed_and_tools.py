@@ -507,15 +507,6 @@ class TestTools:
     def test_descriptions_are_short_with_not_for(self):
         for tool in (QQSendTool(), QQHistoryTool()):
             assert len(tool.description) <= 160 and "Not for" in tool.description
-        send = QQSendTool()
-        exposed = [
-            send.description,
-            send.get_full_documentation(),
-            str(send.get_parameters_schema()),
-        ]
-        assert not any(
-            "sandbox" in text.lower() for text in exposed
-        ), "the sandbox's own prompt introduces sandbox: handles"
 
 
 class TestAuditRegressions:

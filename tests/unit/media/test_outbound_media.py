@@ -12,7 +12,7 @@ import pytest
 from kohakuterrarium.core.trigger_manager import TriggerManager
 from kohakuterrarium.modules.tool.base import ToolContext
 
-from kt_qqbot import media, outbound, sandbox_media, sniff
+from kt_qqbot import media, outbound
 from kt_qqbot.api import FILE_FILE, FILE_IMAGE, FILE_VIDEO, FILE_VOICE
 from kt_qqbot.errors import MediaError
 from kt_qqbot.outbound import MAX_SINGLE_UPLOAD_BYTES, MediaItem, infer_type
@@ -189,9 +189,7 @@ class TestQQSendMedia:
         await feed.stop()
         await hub.close()
 
-    async def test_group_files_are_refused(
-        self, make_hub, fake_api, tmp_path, fake_sandbox
-    ):
+    async def test_group_files_are_refused(self, make_hub, fake_api, tmp_path):
         hub = make_hub()
         feed, ctx = await _setup(
             hub, tmp_path, EVENT_GROUP, group_event("G1", "G1", "P", "x")
@@ -199,166 +197,12 @@ class TestQQSendMedia:
         (tmp_path / "r.pdf").write_bytes(b"pdf")
         result = await QQSendTool().execute({"media": "r.pdf"}, context=ctx)
         assert "group" in result.error and "file" in result.error
-        fake_sandbox.files[("lab", "out/r.pdf")] = b"%PDF-1.7"
-        boxed = await QQSendTool().execute(
-            {"media": "sandbox:lab/out/r.pdf"}, context=ctx
-        )
-        assert boxed.error.endswith("or as an image or video.")
-        assert not fake_api.sent("/files")
         allowed = await QQSendTool(allow_group_files=True).execute(
             {"media": "r.pdf"}, context=ctx
         )
         assert allowed.success
         await feed.stop()
         await hub.close()
-
-    async def test_sandbox_handles(
-        self, make_hub, fake_api, tmp_path, fake_sandbox, monkeypatch
-    ):
-        hub = make_hub()
-        feed, ctx = await _setup(hub, tmp_path, EVENT_C2C, c2c_event("C1", "U1", "x"))
-        fake_sandbox.files[("lab", "out/chart.png")] = PNG
-        fake_sandbox.files[("lab", "notes.png")] = b"just some notes\n"
-        fake_sandbox.files[("lab", "clip.mp4")] = b"\0\0\0\x18ftypisom" + b"\0" * 8
-        fake_sandbox.files[("lab", "big.png")] = PNG + b"\0" * MAX_SINGLE_UPLOAD_BYTES
-        fake_sandbox.files[("lab", "hi.wav")] = b"RIFF\0\0\0\0WAVEfmt "
-        send = QQSendTool()
-
-        ok = await send.execute({"media": "sandbox:lab/out/chart.png"}, context=ctx)
-        assert ok.output.startswith("Sent as m"), ok.error
-        upload = fake_api.sent("/files")[-1]
-        assert upload["file_type"] == 1
-        assert base64.b64decode(upload["file_data"]) == PNG
-        assert fake_sandbox.reads[-1] == (
-            "sandbox:lab/out/chart.png",
-            MAX_SINGLE_UPLOAD_BYTES,
-        ), "the read is capped at the upload limit"
-
-        uploads = len(fake_api.sent("/files"))
-        wrong = await send.execute({"media": "sandbox:lab/notes.png"}, context=ctx)
-        assert wrong.error == (
-            "NOT SENT: notes.png is not an image (it looks like text). Check the "
-            "file, or send it with media_type file."
-        )
-        as_image = await send.execute(
-            {"media": "sandbox:lab/clip.mp4", "media_type": "image"}, context=ctx
-        )
-        assert "clip.mp4 is not an image (it looks like an MP4/MOV video)" in (
-            as_image.error
-        ) and as_image.error.endswith("media_type video.")
-        big = await send.execute({"media": "sandbox:lab/big.png"}, context=ctx)
-        assert big.error == (
-            f"NOT SENT: big.png is larger than {MAX_SINGLE_UPLOAD_BYTES} bytes. "
-            "Send a smaller file."
-        )
-        missing = await send.execute({"media": "sandbox:lab/gone.png"}, context=ctx)
-        assert missing.error == (
-            "NOT SENT: no file gone.png in sandbox lab. List the folder first."
-        ), "the library's message passes through as is"
-        bad_ref = await send.execute({"media": "sandbox:nothing"}, context=ctx)
-        assert bad_ref.error == "NOT SENT: bad sandbox ref. Use sandbox:<name>/<path>."
-        bad_type = await send.execute(
-            {"media": "sandbox:lab/out/chart.png", "media_type": "gif"}, context=ctx
-        )
-        assert "unknown media_type 'gif'" in bad_type.error
-        assert len(fake_api.sent("/files")) == uploads, "refusals upload nothing"
-
-        async def fake_encode(data):
-            return SILK
-
-        monkeypatch.setattr(outbound, "_encode_silk", fake_encode)
-        voice = await send.execute({"media": "sandbox:lab/hi.wav"}, context=ctx)
-        assert voice.success, voice.error
-        upload = fake_api.sent("/files")[-1]
-        assert upload["file_type"] == 3
-        assert base64.b64decode(upload["file_data"]) == SILK
-        assert fake_sandbox.reads[-1][1] == outbound.URL_LIMITS["voice"][0]
-
-        monkeypatch.setattr(sandbox_media, "sandbox_files", None)
-        absent = await send.execute({"media": "sandbox:lab/out/chart.png"}, context=ctx)
-        assert absent.error == f"NOT SENT: {sandbox_media.NOT_INSTALLED}"
-        assert 'pip install "kt-sandbox[manager] @ git+https://' in absent.error
-        local = tmp_path / "sandbox:lab"
-        local.mkdir()
-        (local / "x.png").write_bytes(PNG)
-        shadow = await send.execute({"media": "sandbox:lab/x.png"}, context=ctx)
-        assert shadow.error == absent.error, "a sandbox ref never reads a local path"
-        await feed.stop()
-        await hub.close()
-
-
-PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 24
-
-
-class _SandboxError(Exception):
-    """Stand-in for ``kt_sandbox.errors.SandboxError``."""
-
-
-class _FakeSandboxFiles:
-    """Stand-in for ``kt_sandbox.files`` over an in-memory ``(sandbox, path)`` map."""
-
-    def __init__(self):
-        self.files: dict[tuple[str, str], bytes] = {}
-        self.reads: list[tuple[str, int]] = []
-
-    def parse_ref(self, ref):
-        name, _, path = ref.removeprefix("sandbox:").partition("/")
-        if not name or not path:
-            raise _SandboxError("bad sandbox ref. Use sandbox:<name>/<path>.")
-        return name, path
-
-    def read(self, ref, *, max_bytes):
-        name, path = self.parse_ref(ref)
-        self.reads.append((ref, max_bytes))
-        data = self.files.get((name, path))
-        if data is None:
-            raise _SandboxError(
-                f"no file {path} in sandbox {name}. List the folder first."
-            )
-        if len(data) > max_bytes:
-            raise _SandboxError(
-                f"{path} is larger than {max_bytes} bytes. Send a smaller file."
-            )
-        return SimpleNamespace(
-            sandbox=name, path=path, name=path.rsplit("/", 1)[-1], data=data
-        )
-
-
-@pytest.fixture
-def fake_sandbox(monkeypatch):
-    fake = _FakeSandboxFiles()
-    monkeypatch.setattr(sandbox_media, "sandbox_files", fake)
-    monkeypatch.setattr(sandbox_media, "SandboxError", _SandboxError)
-    return fake
-
-
-def test_sniff_recognises_formats_and_refuses_mismatches():
-    samples = {
-        PNG: ("image", "a PNG image"),
-        b"\xff\xd8\xff\xe0JFIF": ("image", "a JPEG image"),
-        b"GIF89a....": ("image", "a GIF image"),
-        b"RIFF\0\0\0\0WEBPVP8 ": ("image", "a WebP image"),
-        b"\0\0\0\x18ftypmp42": ("video", "an MP4/MOV video"),
-        b"\0\0\0\x18ftypM4A ": ("voice", "M4A audio"),
-        b"\x1a\x45\xdf\xa3....": ("video", "a WebM/MKV video"),
-        SILK: ("voice", "SILK voice"),
-        b"ID3\x04": ("voice", "MP3 audio"),
-        b"%PDF-1.7": ("file", "a PDF document"),
-        "中文笔记".encode() * 10: ("text", "text"),
-    }
-    for data, expected in samples.items():
-        found = sniff.sniff(data)
-        assert (found.kind, found.label) == expected, data[:12]
-    assert sniff.sniff(b"\x00\x01\x02\xfe") is None
-    assert sniff.sniff(b"") is None
-    sniff.check_kind("a.bin", "file", b"anything")
-    sniff.check_kind("a.ogg", "voice", b"\x00\x01odd codec")
-    with pytest.raises(MediaError, match="a.png is not an image QQ can show"):
-        sniff.check_kind("a.png", "image", b"\x00\x01\x02")
-    with pytest.raises(MediaError, match="it looks like a PNG image.*media_type image"):
-        sniff.check_kind("a.wav", "voice", PNG)
-    with pytest.raises(MediaError, match="looks like a PDF.*media_type file"):
-        sniff.check_kind("v.mp4", "video", b"%PDF-1.7")
 
 
 def test_chunked_upload_seam_is_typed():

@@ -123,8 +123,8 @@ delivered.
 | `sticker:<name>` | a sticker from `qq_sticker` |
 | `img:<n>` | candidate n of this creature's latest `qq_image_search` (15 minutes) |
 | `persona` | the persona image `character.png` / `.jpg` / `.jpeg` / `.webp` |
-| `sandbox:<name or id>/<path>` | a file inside a kt-sandbox sandbox (see [Files from a sandbox](#files-from-a-sandbox)) |
 | a path | a file inside the creature's working folder (files the creature made can be sent) |
+| `sandbox:<server>/<path>` | a file inside a [kt-sandbox](https://github.com/Kohaku-Lab/kt-sandbox) sandbox, when its `sandbox.files` plugin is on: the plugin copies the file into the working folder before `qq_send` runs, so it is sent like a local file |
 | an https URL | downloaded by kt-qqbot, then uploaded as bytes (see below) |
 
 Chat attachments are resent from QQ's URL; if that fails, or the message is
@@ -166,26 +166,6 @@ known member becomes a real mention, `<qqbot-at-user id="…" />`; a name two
 members share always stays text).
 
 Mentions of other members in incoming messages show in the feed as `@<name>`.
-
-#### Files from a sandbox
-
-A file inside a [kt-sandbox](https://github.com/Kohaku-Lab/kt-sandbox) sandbox
-is sent with `media="sandbox:<sandbox name or id>/<path>"`, for example
-`sandbox:lab/out/chart.png`. The sandbox's own prompt text tells the creature
-about this handle; `qq_send`'s description does not. kt-qqbot reads the file
-through `kt_sandbox.files` (at most the upload limit, 5 MB) and uploads it as
-bytes. The type comes from `media_type` or the extension, and the first bytes
-must match it: a text file named `chart.png` is refused ("chart.png is not an
-image (it looks like text) …"). Size, voice and group-file rules are the same as
-for local files; errors from the sandbox (no such sandbox, file missing, too
-large, Docker unreachable) are passed on as they are.
-
-kt-sandbox is optional. Without it the tool answers `NOT SENT: sandbox files
-need the kt-sandbox package; …`. Install it with:
-
-```bash
-pip install "kt-sandbox[manager] @ git+https://github.com/Kohaku-Lab/kt-sandbox"
-```
 
 ### `qq_router` plugin
 
@@ -362,5 +342,4 @@ uv venv && uv pip install -e /path/to/KohakuTerrarium -e ".[dev]"
 pytest                                 # unit + integration
 npm install && npm test                # dashboard UI (vitest)
 KT_QQBOT_LIVE=1 pytest tests/live      # real platform, after kt-qqbot login
-KT_QQBOT_SANDBOX_LIVE=1 pytest tests/live/test_sandbox_live.py  # real sandbox: kt-sandbox[manager], Docker, image kt-sandbox:live
 ```
