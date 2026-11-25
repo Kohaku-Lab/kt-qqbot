@@ -120,9 +120,8 @@ def test_character_load_is_logged_once_per_change(caplog):
     plugin = QQCharacterPlugin()
 
     def loaded():
-        return [
-            r for r in caplog.records if r.getMessage().startswith("Character loaded")
-        ]
+        records = {id(r): r for r in caplog.records}.values()
+        return [r for r in records if r.getMessage().startswith("Character loaded")]
 
     plugin.get_prompt_content(None)
     assert len(loaded()) == 1

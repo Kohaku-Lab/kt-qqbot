@@ -97,7 +97,8 @@ async def test_pin_on_start_change_and_removal(caplog):
     assert content[1].url.startswith("data:image/png;base64,")
 
     def loaded():
-        return [r for r in caplog.records if r.getMessage() == "Persona image loaded"]
+        records = {id(r): r for r in caplog.records}.values()
+        return [r for r in records if r.getMessage() == "Persona image loaded"]
 
     assert len(loaded()) == 1
     assert loaded()[0].__dict__.get("width") == 1000
