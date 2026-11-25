@@ -58,6 +58,7 @@ class FakeOpenAPI:
         self.fail_send: str | None = None
         self.fail_upload: str | None = None
         self.fail_codes: list[int] = []
+        self.group_names: dict[str, str] = {}
         self._ids = count(1)
 
     def sent(self, suffix: str = "/messages") -> list[dict]:
@@ -76,6 +77,14 @@ class FakeOpenAPI:
                 200,
                 json={"access_token": f"tok{self.token_calls}", "expires_in": "7200"},
             )
+        if request.method == "GET" and path.endswith("/info"):
+            group = path.split("/")[-2]
+            if group in self.group_names:
+                return httpx.Response(
+                    200,
+                    json={"group_openid": group, "group_name": self.group_names[group]},
+                )
+            return httpx.Response(403, json={"code": 11298, "message": "no access"})
         if path == "/gateway":
             return httpx.Response(200, json={"url": "wss://fake/gateway"})
         if path.endswith("/files"):

@@ -5,6 +5,8 @@ import time
 from datetime import datetime
 from typing import Any
 
+from kt_qqbot.elements import attachments, read_card, read_quote, scene_value
+
 EVENT_C2C = "C2C_MESSAGE_CREATE"
 EVENT_GROUP_AT = "GROUP_AT_MESSAGE_CREATE"
 EVENT_GROUP = "GROUP_MESSAGE_CREATE"
@@ -61,25 +63,6 @@ def _epoch(stamp: Any) -> float:
     return time.time()
 
 
-def _attachments(data: dict) -> list[dict]:
-    items = []
-    for att in data.get("attachments") or []:
-        if not isinstance(att, dict):
-            continue
-        url = str(att.get("url") or "")
-        if url and not url.startswith(("http://", "https://")):
-            url = f"https://{url.lstrip('/')}"
-        items.append(
-            {
-                "content_type": str(att.get("content_type") or ""),
-                "filename": str(att.get("filename") or ""),
-                "url": url,
-                "size": att.get("size"),
-            }
-        )
-    return items
-
-
 def mentions_bot(data: dict, bot_id: str = "") -> bool:
     """Return whether a group message @-mentions the bot.
 
@@ -115,7 +98,10 @@ def parse_message(event: str, data: dict, bot_id: str = "") -> dict | None:
     """Return a message record for a message dispatch, or None for other events.
 
     Record keys: ``conv``, ``kind``, ``msg_id``, ``author``, ``name``,
-    ``content``, ``ts``, ``attachments``, ``mention``, ``reply_to``, ``self``.
+    ``content``, ``ts``, ``attachments``, ``mention``, ``reply_to``, ``self``,
+    and when present ``msg_idx`` (the platform's quote index of this message),
+    ``quote`` (``{text, attachments, author, name, idx}`` of a quoted message)
+    and ``card`` (the label of a shared card). Card images join ``attachments``.
     """
     if event not in MESSAGE_EVENTS:
         return None
@@ -138,7 +124,12 @@ def parse_message(event: str, data: dict, bot_id: str = "") -> dict | None:
     content = _strip_bot_tags(
         str(data.get("content") or ""), bot_id, leading=event == EVENT_GROUP_AT
     )
-    return {
+    quote = read_quote(data)
+    card, card_images = read_card(data, quoting=quote is not None)
+    found = attachments(data.get("attachments"))
+    known = {a["url"] for a in found}
+    found.extend(a for a in card_images if a["url"] not in known)
+    record = {
         "conv": conv_id(kind, str(peer)),
         "kind": kind,
         "msg_id": str(msg_id),
@@ -146,8 +137,16 @@ def parse_message(event: str, data: dict, bot_id: str = "") -> dict | None:
         "name": str(name) if name else "",
         "content": content,
         "ts": _epoch(data.get("timestamp")),
-        "attachments": _attachments(data),
+        "attachments": found,
         "mention": mention,
         "reply_to": str(reference.get("message_id") or ""),
         "self": False,
     }
+    own_idx = scene_value(data, "msg_idx")
+    if own_idx:
+        record["msg_idx"] = own_idx
+    if quote is not None:
+        record["quote"] = quote
+    if card is not None:
+        record["card"] = card
+    return record

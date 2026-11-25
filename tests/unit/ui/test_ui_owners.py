@@ -322,8 +322,9 @@ class TestHubCredentialReload:
 
 
 class TestStatusPanelOwner:
-    async def test_state_and_live_pushes(self, make_hub, tmp_path):
+    async def test_state_and_live_pushes(self, make_hub, fake_api, tmp_path):
         hub = make_hub()
+        fake_api.group_names["G1"] = "Cat Lovers"
         feed = QQFeedTrigger(batch_delay=0, wake="all")
         await feed.attach(hub)
         await feed.start()
@@ -341,8 +342,10 @@ class TestStatusPanelOwner:
         await hub.on_dispatch(EVENT_GROUP, group_event("G3", "G1", "P1", "three"))
         await _until(lambda: events and events[-1][1]["feeds"][0]["chats"])
         await asyncio.sleep(0.05)
+        await _until(lambda: events[-1][1]["feeds"][0]["chats"][0]["name"])
         chat = events[-1][1]["feeds"][0]["chats"][0]
         assert chat["handle"] == "g_g1" and chat["type"] == "group"
+        assert chat["name"] == "Cat Lovers", "the looked-up name is pushed"
         assert chat["unread"] == 3 and chat["seen"] is False
         assert chat["free_slots"] == 15
         assert [m["text"] for m in chat["last"]] == ["two", "three"]

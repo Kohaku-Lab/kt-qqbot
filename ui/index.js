@@ -140,6 +140,7 @@ export const ChatsPanel = {
         <div v-for="chat in feed.chats" :key="chat.handle" class="qq-chat" data-test="chat">
           <div class="qq-row">
             <strong>{{ chat.handle }}</strong>
+            <span v-if="chat.name" data-test="chat-name">{{ chat.name }}</span>
             <span class="qq-muted">{{ chat.type }}</span>
             <span v-if="chat.seen" class="qq-badge">{{ kt.t("seen") }}</span>
             <span v-if="chat.unread" class="qq-badge">{{ kt.t("unread", { n: chat.unread }) }}</span>

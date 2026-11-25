@@ -21,8 +21,20 @@ from kt_qqbot.auth.credentials import Credentials, CredentialStore
 from kt_qqbot.errors import BotInUse, CredentialsMissing, GatewayFatal, QQApiError
 from kt_qqbot.filelock import FileLock
 from kt_qqbot.gateway import Gateway
+from kt_qqbot.hints import (
+    CLOSED_WINDOW,
+    DUPLICATE_SEQ,
+    UNBOUND,
+    api_failure,
+    reply_target_missing,
+)
 from kt_qqbot.ledger import ReplyLedger
-from kt_qqbot.outbound import MAX_SINGLE_UPLOAD_BYTES, ChunkedUploader, MediaItem
+from kt_qqbot.outbound import (
+    MAX_SINGLE_UPLOAD_BYTES,
+    ChunkedUploader,
+    MediaItem,
+    split_text,
+)
 from kt_qqbot.paths import lock_path, root_dir, vault_path
 from kt_qqbot.records import native_mentions, parse_message, split_conv_id
 from kt_qqbot.store import ChatStore
@@ -47,10 +59,7 @@ class SendResult:
 
 CREDS_CHECK_S = 2.0
 SESSION_SAVE_S = 1.0
-CLOSED_WINDOW = (
-    "the reply window has closed (group: someone must speak within 5 min; "
-    "private: 60 min). Wait for the next message."
-)
+GROUP_NAME_RETRY_S = 24 * 3600
 # QQ codes for a passive-reply msg_id that expired or ran out of replies.
 SLOT_CLOSED_CODES = {40034128, 40034005, 304103}
 DUPLICATE_SEQ_CODE = 40054005
@@ -111,6 +120,7 @@ class QQHub:
         self._new_conv_listeners: list[Callable[[str], Any]] = []
         self._listeners: list[Callable[[str, str], None]] = []
         self._refs = 0
+        self._name_jobs: dict[str, asyncio.Task] = {}
         self._raw_left = 0
         self._raw_path: Path | None = None
         self._creds_checked_at = time.monotonic()
@@ -178,6 +188,14 @@ class QQHub:
     async def close(self) -> None:
         """Stop the gateway and close the store and HTTP client."""
         await self._stop_gateway()
+        jobs, self._name_jobs = list(self._name_jobs.values()), {}
+        for job in jobs:
+            job.cancel()
+        for job in jobs:
+            try:
+                await job
+            except asyncio.CancelledError:
+                pass
         if self._session_dirty or getattr(self.gateway, "session_id", None):
             self._save_session(force=True)
         self.store.close()
@@ -238,7 +256,7 @@ class QQHub:
     # ── change listeners ───────────────────────────────────────────
 
     def add_listener(self, callback: Callable[[str, str], None]) -> None:
-        """Call ``callback(kind, conv)`` on ``message``, ``sent`` and ``gateway`` changes."""
+        """Call ``callback(kind, conv)`` on message, sent, chat and gateway changes."""
         self._listeners.append(callback)
 
     def remove_listener(self, callback: Callable[[str, str], None]) -> None:
@@ -309,16 +327,42 @@ class QQHub:
             return
         await self.ingest(record)
 
-    async def ingest(self, record: dict) -> int | None:
-        """Store one parsed inbound record; return its sequence number."""
-        is_new = self.store.conv_meta(record["conv"]) is None
-        record.setdefault("recv", time.time())
+    def _resolve_quote(self, record: dict) -> None:
+        """Link a quote to the stored message it names and note quotes of the bot."""
+        cid = record["conv"]
         if record.get("reply_to") and "to_self" not in record:
             found = self.store.find(record["reply_to"])
             target = self.store.get(*found) if found else None
             record["to_self"] = bool(target and target.get("self"))
-            if found and found[0] == record["conv"]:
+            if found and found[0] == cid:
                 record["reply_seq"] = found[1]
+        quote = record.get("quote")
+        if not isinstance(quote, dict):
+            return
+        seq = (
+            None
+            if record.get("reply_seq")
+            else self.store.find_idx(cid, quote.get("idx", ""))
+        )
+        if seq is not None:
+            record["reply_seq"] = seq
+            target = self.store.get(cid, seq)
+            if target is not None and target.get("self"):
+                record["to_self"] = True
+        author = str(quote.get("author") or "")
+        if author and author == self.bot_id:
+            quote["self"] = True
+            record["to_self"] = True
+        elif author:
+            alias = self.store.alias_of(cid, author)
+            if alias:
+                quote["alias"] = alias
+
+    async def ingest(self, record: dict) -> int | None:
+        """Store one parsed inbound record; return its sequence number."""
+        is_new = self.store.conv_meta(record["conv"]) is None
+        record.setdefault("recv", time.time())
+        self._resolve_quote(record)
         seq = self.store.append(record)
         if seq is None:
             if record.get("mention"):
@@ -327,6 +371,7 @@ class QQHub:
             return None
         sent_at = min(float(record.get("ts") or record["recv"]), record["recv"])
         self.ledger.note_inbound(record["conv"], record["msg_id"], sent_at)
+        self._schedule_group_name(record["conv"])
         for wakeup in list(self._wakeups):
             wakeup.set()
         self._notify("message", record["conv"])
@@ -345,6 +390,49 @@ class QQHub:
                     )
         return seq
 
+    # ── group names ────────────────────────────────────────────────
+
+    def _schedule_group_name(self, cid: str) -> None:
+        """Look up a group's name in the background when it was never or long ago tried."""
+        if not cid.startswith("group:") or cid in self._name_jobs or self.unbound:
+            return
+        meta = self.store.conv_meta(cid) or {}
+        checked = meta.get("name_checked_at")
+        if checked is not None and time.time() - float(checked) < GROUP_NAME_RETRY_S:
+            return
+        self.store.update_conv(cid, name_checked_at=time.time())
+        job = asyncio.create_task(self.refresh_group_name(cid))
+        self._name_jobs[cid] = job
+        job.add_done_callback(lambda _: self._name_jobs.pop(cid, None))
+
+    async def refresh_group_name(self, cid: str) -> str:
+        """Fetch a group's name into the conversation meta; ``""`` on any failure.
+
+        Failures are logged at debug and remembered as ``name_failed_at``.
+        """
+        kind, openid = split_conv_id(cid)
+        if kind != "group":
+            return ""
+        now = time.time()
+        self.store.update_conv(cid, name_checked_at=now)
+        try:
+            body = await self.api.group_info(openid)
+            name = str(body.get("group_name") or "").strip()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Group name lookup failed", conv=cid, error=str(exc))
+            self.store.update_conv(cid, name_failed_at=now)
+            return ""
+        if not name:
+            self.store.update_conv(cid, name_failed_at=now)
+            return ""
+        changed = self.store.conv_name(cid) != name
+        self.store.update_conv(cid, name=name, name_failed_at=None)
+        if changed:
+            self._notify("chat", cid)
+        return name
+
     # ── outbound ───────────────────────────────────────────────────
 
     async def send(
@@ -356,57 +444,65 @@ class QQHub:
         reply_to_seq: int | None = None,
         media: "list[MediaItem] | tuple[MediaItem, ...]" = (),
         mention_format: str = "plain",
+        max_chars: int | None = None,
     ) -> SendResult:
         """Send text, then each media item, as separate messages in order.
 
-        Every message takes its own passive-reply slot. The quote, if any,
-        goes on the first message. A failure stops the rest. With
+        Text longer than ``max_chars`` goes out as several messages split at
+        paragraph / sentence boundaries. Every message takes its own
+        passive-reply slot. The quote, if any, goes on the first message. A
+        failure stops the rest; every failure reason ends with a next step. With
         ``mention_format="markdown"``, group text goes out as a markdown
         message and ``@<alias>`` of a known member becomes a native mention
         (the bot needs QQ markdown permission); the stored copy keeps the alias.
         """
         kind, openid = split_conv_id(cid)
-        wire_text = text
         markdown = kind == "group" and mention_format == "markdown"
-        if markdown:
-            wire_text = native_mentions(text, self.store.members(cid))
+        members = self.store.members(cid) if markdown else {}
         await self.refresh_credentials()
         if self.unbound:
-            return SendResult(False, reason="the bot is unbound; run kt-qqbot login")
+            return SendResult(False, reason=UNBOUND)
         reference = None
         if reply_to_seq is not None:
             target = self.store.get(cid, reply_to_seq)
             if target is None:
-                return SendResult(False, reason=f"m{reply_to_seq} is not in this chat")
+                reason = reply_target_missing(reply_to_seq, self.store.low(cid))
+                return SendResult(False, reason=reason)
             reference = target.get("msg_id") or None
-        parts: list[MediaItem | None] = ([None] if text else []) + list(media)
+        texts = split_text(text, max_chars) if text and max_chars else [text]
+        parts: list[str | MediaItem] = [t for t in texts if t] + list(media)
         seqs: list[int] = []
         for item in parts:
             if not self.ledger.usable(cid, kind):
                 return SendResult(
                     False, seqs=tuple(seqs), passive=True, reason=CLOSED_WINDOW
                 )
+            is_text = isinstance(item, str)
             try:
                 file_info = None
-                if item is not None:
+                if not is_text:
                     file_info = await self._upload(kind, openid, item)
+                wire = native_mentions(item, members) if is_text and markdown else item
                 body = await self._send_on_slot(
                     cid,
                     kind,
                     openid,
-                    **self._text_or_media(wire_text, item, markdown),
+                    **self._text_or_media(wire, markdown),
                     reference_id=reference,
                     media_file_info=file_info,
                 )
             except QQApiError as exc:
-                reason = exc.message or str(exc)
-                logger.info("QQ send failed", conv=cid, error=reason)
+                logger.info("QQ send failed", conv=cid, error=exc.message or str(exc))
+                if exc.code == DUPLICATE_SEQ_CODE:
+                    reason = DUPLICATE_SEQ
+                else:
+                    reason = api_failure(exc, upload=not is_text and file_info is None)
                 return SendResult(False, seqs=tuple(seqs), passive=True, reason=reason)
             if body is None:
                 return SendResult(
                     False, seqs=tuple(seqs), passive=True, reason=CLOSED_WINDOW
                 )
-            content = text if item is None else f"[{item.media_type}: {item.name}]"
+            content = item if is_text else f"[{item.media_type}: {item.name}]"
             seq = self._record_self(cid, kind, body, content, reference, by)
             if seq is not None:
                 seqs.append(seq)
@@ -415,10 +511,11 @@ class QQHub:
         return SendResult(True, seqs=tuple(seqs), passive=True)
 
     @staticmethod
-    def _text_or_media(text: str, item: "MediaItem | None", markdown: bool) -> dict:
+    def _text_or_media(item: "str | MediaItem", markdown: bool) -> dict:
         """Message fields for one text or media message."""
-        if item is not None:
+        if not isinstance(item, str):
             return {"content": "", "msg_type": MSG_MEDIA}
+        text = item
         if markdown:
             return {"msg_type": MSG_MARKDOWN, "extra": {"markdown": {"content": text}}}
         return {"content": text, "msg_type": MSG_TEXT}

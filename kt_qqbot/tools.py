@@ -8,7 +8,6 @@ import re
 import time
 from pathlib import Path
 from typing import Any, ClassVar
-from urllib.parse import urlparse
 
 from kohakuterrarium.modules.tool.base import (
     BaseTool,
@@ -29,18 +28,21 @@ from kt_qqbot.outbound import (
     MEDIA_TYPES,
     MediaItem,
     check_size,
+    download,
     parse_media_arg,
     prepare,
+    split_text,
 )
 from kt_qqbot.paths import root_dir
 from kt_qqbot.persona import find_persona
-from kt_qqbot.render import media_kind
+from kt_qqbot.render import chat_title, media_kind
 from kt_qqbot.stickers import StickerLibrary
 from kt_qqbot.trigger import QQFeedTrigger, feeds_of
 
 logger = get_logger("kt_qqbot.tools")
 
 MAX_MESSAGE_CHARS = 2000
+MAX_TEXT_PARTS = 3
 # QQ attachment links stop working after a while; older handles need a cached copy.
 ATTACHMENT_TTL_S = 24 * 3600
 HISTORY_MAX = 100
@@ -62,15 +64,20 @@ Send one chat message to a QQ chat (private or group) that your feed delivered.
 
 ## Behavior
 
-- The result is `Sent as m57`, or `NOT SENT: <reason>`.
+- The result is `Sent as m57`, or `NOT SENT: <reason>` where the reason ends
+  with what to do next.
 - If chat arrived in that chat since your last delivery, the first call returns
   that chat and does not send. Read it, then call again (same or revised text)
   or stop.
 - You can only send to chats your feed delivered to you.
 - Text is sent first, then each media item as its own message. Files you made
   (for example generated images) can be sent by path.
+- Text over 2000 characters is split at paragraph or sentence breaks into up
+  to 3 messages, each using one reply; longer text is not sent.
+- An https URL is downloaded first and sent as a file upload; it must be a
+  direct link to the media (not a web page) on a public host.
 - Voice must be SILK; other audio is converted when the voice codec is
-  installed. Local files over 5 MB cannot be sent yet.
+  installed. Files over 5 MB cannot be sent yet.
 - Group chats do not take `file` messages.
 - Every message is a reply to a recent incoming message: within 5 min in a
   group (5 replies per message) and 60 min in a private chat (4 replies). QQ
@@ -109,20 +116,32 @@ def resolve_chat(
     """Return ``(feed, conv)`` for a chat handle, or an error message."""
     feeds = feeds_of(getattr(context, "agent", None))
     if not feeds:
-        return "this creature has no running qq_feed trigger"
+        return (
+            "this creature has no running qq_feed trigger. Start one with "
+            "qq_watch, then wait for chat."
+        )
     if not handle:
         recent = {(f, c) for f in feeds for c in f.last_delivered}
         if len(recent) == 1:
             return next(iter(recent))
-        handles = sorted(f.hub.store.handle(c) for f, c in recent)
+        handles = sorted(
+            chat_title(f.hub.store.handle(c), f.hub.store.conv_name(c))
+            for f, c in recent
+        )
         if not handles:
-            return "no chat delivered yet; say which chat with `to`"
+            return (
+                "no chat delivered yet. Wait for chat to arrive, then name it "
+                "with `to`."
+            )
         return f"say which chat with `to`; recent chats: {', '.join(handles)}"
     for feed in feeds:
         cid = feed.hub.store.resolve_handle(handle.strip())
         if cid is not None and feed.known(cid):
             return feed, cid
-    return f"unknown chat {handle!r}; you can only use chats your feed delivered"
+    return (
+        f"unknown chat {handle!r}; you can only use chats your feed delivered. "
+        'Use the chat="…" handle from a <qq_update> block.'
+    )
 
 
 class QQSendTool(BaseTool):
@@ -134,7 +153,8 @@ class QQSendTool(BaseTool):
 
     def __init__(self, config: ToolConfig | None = None, **options: Any):
         super().__init__(config)
-        self.max_chars = int(options.get("max_chars", MAX_MESSAGE_CHARS))
+        self.max_chars = max(int(options.get("max_chars", MAX_MESSAGE_CHARS)), 1)
+        self.http = options.get("http")
         self.allow_group_files = bool(options.get("allow_group_files", False))
         self.mention_format = str(options.get("mention_format", "plain"))
         if self.mention_format not in ("markdown", "plain"):
@@ -201,18 +221,24 @@ class QQSendTool(BaseTool):
     ) -> ToolResult:
         """Send, or return chat that arrived since the last delivery."""
         if not access.allowed(context):
-            return ToolResult(error=access.ADMIN_ONLY)
+            return ToolResult(
+                error=f"{access.ADMIN_ONLY}. This creature cannot reach QQ; "
+                "answer without qq_send."
+            )
         message = str(args.get("message") or "").strip()
         try:
             specs = parse_media_arg(args.get("media"))
         except MediaError as exc:
             return ToolResult(error=f"NOT SENT: {exc}")
         if not message and not specs:
-            return ToolResult(error="NOT SENT: empty message")
-        if len(message) > self.max_chars:
             return ToolResult(
-                error=f"NOT SENT: message longer than {self.max_chars} characters; "
-                "split it into shorter chat messages"
+                error="NOT SENT: empty message. Give message text, media, or both."
+            )
+        if len(split_text(message, self.max_chars)) > MAX_TEXT_PARTS:
+            return ToolResult(
+                error=f"NOT SENT: message is {len(message)} characters, longer than "
+                f"{MAX_TEXT_PARTS} chat messages of {self.max_chars}. Shorten it "
+                "to a few short messages."
             )
         resolved = resolve_chat(context, args.get("to"))
         if isinstance(resolved, str):
@@ -237,7 +263,10 @@ class QQSendTool(BaseTool):
 
         reply_seq = _seq(args.get("reply_to"))
         if args.get("reply_to") and reply_seq is None:
-            return ToolResult(error=f"NOT SENT: bad reply_to {args.get('reply_to')!r}")
+            return ToolResult(
+                error=f"NOT SENT: bad reply_to {args.get('reply_to')!r}. Use a tag "
+                "like m41, or leave reply_to out."
+            )
         try:
             media = await self._prepare_media(
                 specs, args.get("media_type") or None, cid, feed, context
@@ -252,6 +281,7 @@ class QQSendTool(BaseTool):
             reply_to_seq=reply_seq,
             media=media,
             mention_format=self.mention_format,
+            max_chars=self.max_chars,
         )
         if result.sent:
             return ToolResult(output=f"Sent as {_tags(result.seqs)}", exit_code=0)
@@ -288,25 +318,30 @@ class QQSendTool(BaseTool):
         limit = None if feed.hub.chunked_uploader is not None else MAX_UPLOAD
         items = []
         for spec in specs:
-            handle = self._resolve_handle(spec, media_type, cid, feed, context)
+            handle = await self._resolve_handle(
+                spec, media_type, cid, feed, context, limit
+            )
             if handle is None:
-                handle = await prepare(spec, media_type, resolve, size_limit=limit)
+                handle = await prepare(
+                    spec, media_type, resolve, size_limit=limit, client=self.http
+                )
             items.append(handle)
         if cid.startswith("group:") and not self.allow_group_files:
             if any(item.media_type == "file" for item in items):
                 raise MediaError(
-                    "QQ group chats do not take file messages; send it in a "
-                    "private chat, or as an image or video"
+                    "QQ group chats do not take file messages. Send it in a "
+                    "private chat, or as an image or video."
                 )
         return items
 
-    def _resolve_handle(
+    async def _resolve_handle(
         self,
         spec: str,
         media_type: str | None,
         cid: str,
         feed: QQFeedTrigger,
         context: ToolContext | None,
+        limit: int | None,
     ) -> MediaItem | None:
         """Resolve ``persona`` / ``sticker:`` / ``img:`` / ``m<seq>.<n>`` handles; None for paths."""
         if spec == "persona":
@@ -326,7 +361,9 @@ class QQSendTool(BaseTool):
             try:
                 path = StickerLibrary(self.sticker_directory).resolve(spec[8:])
             except ValueError as exc:
-                raise MediaError(str(exc)) from exc
+                raise MediaError(
+                    f"{exc}. Search with qq_sticker and use a sticker:<name> it shows."
+                ) from exc
             item = MediaItem(
                 "image", MEDIA_TYPES["image"], path.name, data=path.read_bytes()
             )
@@ -337,11 +374,12 @@ class QQSendTool(BaseTool):
             result = SEARCHES.get(owner_of(context), number)
             if result is None:
                 raise MediaError(
-                    f"{spec} is not a current search result; search again "
-                    "(handles come from your own latest qq_image_search, 15 min)"
+                    f"{spec} is not a current search result. Search again "
+                    "(handles come from your own latest qq_image_search, 15 min)."
                 )
-            name = Path(urlparse(result.url).path).name or "image"
-            return MediaItem("image", MEDIA_TYPES["image"], name, url=result.url)
+            return await download(
+                result.url, "image", size_limit=limit, client=self.http
+            )
         parsed = parse_chat_handle(spec)
         if parsed is None:
             return None
@@ -352,14 +390,20 @@ class QQSendTool(BaseTool):
             source = store.resolve_handle(chat) or ""
             if not source or not feed.known(source):
                 raise MediaError(
-                    f"unknown chat {chat!r}; you can only use chats your feed delivered"
+                    f"unknown chat {chat!r}; you can only use chats your feed "
+                    "delivered. Use a chat handle from a <qq_update> block."
                 )
         record = store.get(source, seq)
         if record is None:
-            raise MediaError(f"m{seq} is no longer kept; ask for it again")
+            raise MediaError(
+                f"m{seq} is no longer kept. Ask the sender to post it again."
+            )
         attachments = record.get("attachments") or []
         if not 1 <= index <= len(attachments):
-            raise MediaError(f"{spec}: m{seq} has no attachment {index}")
+            raise MediaError(
+                f"{spec}: m{seq} has no attachment {index}. Use a tag the feed "
+                "shows, such as [image m12.1]."
+            )
         att = attachments[index - 1]
         kind = media_type or media_kind(att.get("content_type", ""))
         name = att.get("filename") or f"m{seq}.{index}"
@@ -369,8 +413,8 @@ class QQSendTool(BaseTool):
         if age > ATTACHMENT_TTL_S or not url.startswith("https://"):
             if cached is None:
                 raise MediaError(
-                    f"{spec} is too old to resend (QQ attachment links expire); "
-                    "ask for it again"
+                    f"{spec} is too old to resend (QQ attachment links expire). "
+                    "Ask the sender to post it again."
                 )
             return MediaItem(kind, MEDIA_TYPES[kind], name, data=cached.read_bytes())
         return MediaItem(kind, MEDIA_TYPES[kind], name, url=url, fallback=cached)

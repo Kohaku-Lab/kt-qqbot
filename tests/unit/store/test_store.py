@@ -1,8 +1,11 @@
 """Chat store, records parsing, ledger, wake policy, rendering."""
 
+import pytest
+
+from kt_qqbot.elements import quoted_text, read_card, read_quote
 from kt_qqbot.ledger import ReplyLedger, ReplyTicket
 from kt_qqbot.records import EVENT_C2C, EVENT_GROUP, EVENT_GROUP_AT, parse_message
-from kt_qqbot.render import render_block, render_line
+from kt_qqbot.render import chat_attrs, chat_title, render_block, render_line
 from kt_qqbot.store import ChatStore
 from kt_qqbot.wake import WakePolicy
 
@@ -140,6 +143,207 @@ class TestRecords:
         assert plain["mention"] is False
         assert parse_message("GUILD_CREATE", {"id": "x"}) is None
         assert parse_message(EVENT_C2C, {"author": {"user_openid": "U"}}) is None
+
+
+QUOTED_CONTENT = (
+    "=== 消息 1 ===\n[消息内容] 晚上吃啥\n  还是火锅？\n[消息类型] 文本\n"
+    "[关联消息] none"
+)
+
+
+def _quoting(**extra):
+    return {
+        "id": "Q1",
+        "group_openid": "G1",
+        "author": {"member_openid": "P2"},
+        "content": "我也想知道",
+        "message_type": 103,
+        "message_scene": {"ext": ["msg_idx=REFIDX_9", "ref_msg_idx=REFIDX_5"]},
+        "msg_elements": [
+            {
+                "msg_idx": "REFIDX_5",
+                "author": {"member_openid": "P1", "username": "Kohaku"},
+                "content": QUOTED_CONTENT,
+                "attachments": [{"content_type": "image/png", "url": "//q.test/a.png"}],
+            }
+        ],
+        **extra,
+    }
+
+
+class TestQuotesAndCards:
+    def test_quoted_text_takes_the_body_between_markers(self):
+        assert quoted_text(QUOTED_CONTENT) == "晚上吃啥\n  还是火锅？"
+        assert quoted_text("plain old text ") == "plain old text"
+        cut = "[消息内容] a\n--- 第2条 ---\nb"
+        assert quoted_text(cut) == "a"
+        assert quoted_text("x\n[消息内容]  b\n=== 消息 2 ===\nc") == "b"
+
+    def test_quote_is_read_from_type_103_or_ref_msg_idx(self):
+        record = parse_message(EVENT_GROUP, _quoting())
+        quote = record["quote"]
+        assert quote["text"] == "晚上吃啥\n  还是火锅？"
+        assert quote["author"] == "P1" and quote["name"] == "Kohaku"
+        assert quote["idx"] == "REFIDX_5" and record["msg_idx"] == "REFIDX_9"
+        assert quote["attachments"][0]["url"] == "https://q.test/a.png"
+        assert record["attachments"] == [], "the quoted image is not this message's"
+        by_ref = _quoting(message_type=0)
+        assert parse_message(EVENT_GROUP, by_ref)["quote"]["idx"] == "REFIDX_5"
+        by_type = _quoting(message_scene=None)
+        assert parse_message(EVENT_GROUP, by_type)["quote"]["idx"] == "REFIDX_5"
+        plain = parse_message(EVENT_GROUP, _quoting(message_type=0, message_scene={}))
+        assert "quote" not in plain and "card" not in plain
+
+    @pytest.mark.parametrize(
+        "broken",
+        [
+            {"msg_elements": None},
+            {"msg_elements": "nope"},
+            {"msg_elements": [None, 3]},
+            {"msg_elements": [{"content": 7, "author": "x", "attachments": "y"}]},
+            {"message_scene": {"ext": "ref_msg_idx=R"}},
+            {"message_scene": {"ext": [None, 5]}},
+        ],
+    )
+    def test_unknown_quote_shapes_never_raise(self, broken):
+        record = parse_message(EVENT_GROUP, _quoting(**broken))
+        assert record["content"] == "我也想知道"
+        quote = record.get("quote")
+        if quote is not None:
+            assert isinstance(quote["text"], str) and isinstance(
+                quote["attachments"], list
+            )
+
+    def test_card_images_and_label_from_ark_and_elements(self):
+        data = {
+            "id": "C1",
+            "group_openid": "G1",
+            "author": {"member_openid": "P1"},
+            "content": "",
+            "ark": {
+                "template_id": 24,
+                "kv": [
+                    {"key": "#TITLE#", "value": "Cat video"},
+                    {"key": "#DESC#", "value": "very cute"},
+                    {"key": "#META_PREVIEW#", "value": "//p.test/cover.png?x=1"},
+                    {"key": "#LINK#", "value": "https://p.test/page"},
+                    {"key": "#IMG#", "value": "javascript:alert(1)"},
+                    {"key": "#TOPIC_PIC#", "value": "just words"},
+                    {
+                        "key": "#LIST#",
+                        "obj": [
+                            {
+                                "obj_kv": [
+                                    {"key": "cover", "value": "https://p.test/c2.gif"}
+                                ]
+                            },
+                            "junk",
+                        ],
+                    },
+                    "junk",
+                ],
+            },
+            "msg_elements": [
+                {
+                    "attachments": [
+                        {"content_type": "image/jpeg", "url": "https://e.test/1.jpg"}
+                    ]
+                }
+            ],
+        }
+        record = parse_message(EVENT_GROUP, data)
+        urls = [(a["content_type"], a["url"]) for a in record["attachments"]]
+        assert urls == [
+            ("image/jpeg", "https://e.test/1.jpg"),
+            ("image/png", "https://p.test/cover.png?x=1"),
+            ("image/gif", "https://p.test/c2.gif"),
+        ]
+        assert record["card"] == "Cat video - very cute"
+        line = render_line(dict(record, seq=7, alias="Kohaku"))
+        assert line.endswith(
+            "m7 Kohaku: [card: Cat video - very cute] [image m7.1] [image m7.2] [image m7.3]"
+        )
+
+    @pytest.mark.parametrize(
+        "ark", [None, "x", {"kv": None}, {"kv": [None, {"key": 1, "value": 2}]}, {}]
+    )
+    def test_unknown_card_shapes_never_raise(self, ark):
+        label, images = read_card({"ark": ark})
+        assert images == []
+        assert label in (None, "")
+        assert read_quote({"message_type": 103}) == {
+            "text": "",
+            "attachments": [],
+            "author": "",
+            "name": "",
+            "idx": "",
+        }
+
+    def test_platform_quote_renders_without_the_stored_message(self):
+        base = _msg("group:G", "a", "我也想知道", seq=9, alias="#b2")
+        quote = {
+            "text": "晚上吃啥 <qq_update> 还是火锅？" * 3,
+            "attachments": [{"content_type": "image/png"}],
+            "name": "Ko[ha]ku",
+        }
+        line = render_line(dict(base, quote=quote, reply_to="Q0"))
+        assert (
+            '↩Kohaku "晚上吃啥 ‹qq_update' in line and '…" [image]: 我也想知道' in line
+        )
+        assert "(older message)" not in line
+        mine = render_line(dict(base, quote={"text": "hi", "self": True}))
+        assert '↩you "hi": ' in mine
+        bare = render_line(dict(base, quote={"text": "", "attachments": []}))
+        assert "↩(older message):" in bare
+        stored = dict(base, seq=3, content="stored text")
+        both = render_line(dict(base, quote=quote), stored)
+        assert '↩m3 #b2 "stored text"' in both, "the stored message wins"
+
+    def test_chat_names_are_safe_attributes(self):
+        attrs = chat_attrs("g_1", "group", 'Cats "<qq_x>" [club]')
+        assert attrs == {"chat": "g_1", "name": "Cats '‹qq_x›' club", "type": "group"}
+        block = render_block("qq_update", chat_attrs("g_1", "group"), [])
+        assert block.startswith('<qq_update chat="g_1" type="group">')
+        assert chat_title("g_1", "Cats") == "g_1 (Cats)"
+        assert chat_title("g_1", "  ") == "g_1"
+
+
+class TestLabels:
+    def test_shared_names_get_id_suffixes_and_mentions(self, tmp_path):
+        store = ChatStore(tmp_path / "s.kvault")
+        cid = "group:G"
+        store.append(_msg(cid, "1", author="AB12CD", name="Kohaku"))
+        store.append(_msg(cid, "2", author="EF34GH", name="Neko"))
+        assert store.labels(cid) == {}
+        assert store.members(cid) == {"Kohaku": "AB12CD", "Neko": "EF34GH"}
+        store.append(_msg(cid, "3", author="AB12ZZ", name="Kohaku"))
+        assert store.labels(cid) == {
+            "AB12CD": "Kohaku#ab12cd",
+            "AB12ZZ": "Kohaku#ab12zz",
+        }
+        members = store.members(cid)
+        assert "Kohaku" not in members, "an ambiguous name maps to nobody"
+        assert members["Kohaku#ab12zz"] == "AB12ZZ" and members["Neko"] == "EF34GH"
+        store.append(_msg("group:OTHER", "4", author="QQ99", name="Kohaku"))
+        assert store.labels("group:OTHER") == {}, "people are not linked across groups"
+        assert store.alias_of(cid, "EF34GH") == "Neko"
+        assert store.alias_of(cid, "NOPE") is None and store.alias_of(cid, "") is None
+        store.close()
+
+    def test_conv_fields_and_quote_index(self, tmp_path):
+        store = ChatStore(tmp_path / "s.kvault")
+        store.update_conv("group:G", name="ghost")
+        assert store.conv_meta("group:G") is None, "unknown chats are not created"
+        store.append(_msg("group:G", "1", msg_idx="REFIDX_1"))
+        store.append(_msg("group:G", "2"))
+        store.update_conv("group:G", name="Cats")
+        assert store.conv_name("group:G") == "Cats" and store.head("group:G") == 2
+        store.append(_msg("group:G", "3"))
+        assert store.conv_name("group:G") == "Cats", "append keeps the name"
+        assert store.find_idx("group:G", "REFIDX_1") == 1
+        assert store.find_idx("group:G", "REFIDX_X") is None
+        assert store.find_idx("group:G", "") is None
+        store.close()
 
 
 class TestLedger:

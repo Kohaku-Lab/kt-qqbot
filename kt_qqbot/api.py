@@ -220,6 +220,14 @@ class QQApi:
             "POST", self._messages_path(kind, openid), json=payload
         )
 
+    async def group_info(self, group_openid: str) -> dict:
+        """Return ``{group_openid, group_name, group_member_num}`` of one group.
+
+        ``GET /v2/groups/{group_openid}/info`` is undocumented (shape taken
+        from other projects) and QQ may refuse it for a bot.
+        """
+        return await self.request("GET", f"/v2/groups/{group_openid}/info")
+
     async def upload_media(
         self,
         kind: str,

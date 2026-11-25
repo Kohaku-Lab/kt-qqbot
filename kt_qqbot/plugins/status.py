@@ -98,6 +98,7 @@ class QQStatusPlugin(BasePlugin):
             chats.append(
                 {
                     "handle": store.handle(cid),
+                    "name": store.conv_name(cid),
                     "type": CHAT_TYPES.get(kind, kind),
                     "seen": feed.known(cid),
                     "unread": feed.unread(cid),

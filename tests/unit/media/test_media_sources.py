@@ -1,5 +1,6 @@
 """Media sources for qq_send: chat media handles, stickers, image search, web guard."""
 
+import base64
 import time
 from types import SimpleNamespace
 
@@ -367,7 +368,7 @@ async def test_image_search_guards(monkeypatch, tmp_path):
     assert "too many image searches" in again.error
 
 
-async def test_img_handles_are_sent_by_url_and_expire(
+async def test_img_handles_are_downloaded_and_expire(
     monkeypatch, make_hub, fake_api, tmp_path
 ):
     monkeypatch.setattr(media, "check_public_url", _allow)
@@ -379,16 +380,27 @@ async def test_img_handles_are_sent_by_url_and_expire(
     await QQImageSearchTool(
         backend=FakeBackend([_result(1), _result(2)]), http=_thumb_client()
     ).execute({"query": "cat"}, context=ctx)
-    ok = await QQSendTool().execute({"media": "img:2"}, context=ctx)
+    fetched = []
+
+    def full_image(request):
+        fetched.append(str(request.url))
+        return httpx.Response(
+            200, content=b"J" * 64, headers={"content-type": "image/jpeg"}
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(full_image))
+    ok = await QQSendTool(http=http).execute({"media": "img:2"}, context=ctx)
     assert ok.success, ok.error
-    assert fake_api.sent("/files")[-1]["url"] == "https://img.test/full2.jpg"
+    assert fetched == ["https://img.test/full2.jpg"]
+    upload = fake_api.sent("/files")[-1]
+    assert "url" not in upload and base64.b64decode(upload["file_data"]) == b"J" * 64
     other = await QQSendTool().execute(
         {"media": "img:1"}, context=_ctx(tmp_path, feed, "c9")
     )
-    assert "img:1" in other.error and "search again" in other.error
+    assert "img:1" in other.error and "Search again" in other.error
     SEARCHES._entries["c3"] = (time.time() - 10_000, SEARCHES._entries["c3"][1])
     expired = await QQSendTool().execute({"media": "img:1"}, context=ctx)
-    assert "search again" in expired.error
+    assert "Search again" in expired.error
     await feed.stop()
     await hub.close()
 

@@ -155,6 +155,7 @@ test("panel: chats, slots and live pushes", async () => {
         chats: [
           {
             handle: "g_ab12",
+            name: "Cat Lovers",
             type: "group",
             seen: true,
             unread: 2,
@@ -168,6 +169,7 @@ test("panel: chats, slots and live pushes", async () => {
   await flush()
   expect(wrapper.findAll("[data-test=chat]")).toHaveLength(1)
   expect(wrapper.find("[data-test=slots]").text()).toBe("3 reply slots")
+  expect(wrapper.find("[data-test=chat-name]").text()).toBe("Cat Lovers")
   expect(wrapper.text()).toContain("2 unread")
   expect(wrapper.text()).toContain("#a3f9: hi")
 })

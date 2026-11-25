@@ -124,7 +124,7 @@ delivered.
 | `img:<n>` | candidate n of this creature's latest `qq_image_search` (15 minutes) |
 | `persona` | the persona image `character.png` / `.jpg` / `.jpeg` / `.webp` |
 | a path | a file inside the creature's working folder (files the creature made can be sent) |
-| an https URL | QQ downloads it |
+| an https URL | downloaded by kt-qqbot, then uploaded as bytes (see below) |
 
 Chat attachments are resent from QQ's URL; if that fails, or the message is
 older than a day, the copy kept when the feed downloaded it is used (images
@@ -136,12 +136,24 @@ message uses one passive-reply slot. `media_type` (`image`, `video`, `voice`,
 
 - Voice must be SILK. Other audio is converted when the optional codec is
   installed (`pip install "kt-qqbot[voice]"`, which adds `graiax-silkcoder`);
-  without it the tool answers `NOT SENT: voice needs silk; install kt-qqbot[voice]`.
-  Voice URLs must point to a `.silk` file.
-- Local files over 5 MB are refused. QQ's chunked upload is not implemented;
+  without it the tool answers `NOT SENT: voice needs silk and the voice codec is
+  not installed; …`.
+- https URLs (and `img:<n>` candidates) are downloaded by kt-qqbot, never
+  handed to QQ: every hop (at most 3 redirects, followed by hand) must be https
+  to a globally routable address; the `Content-Type` must fit the media type
+  (`image/*`, `video/*`, `audio/*` or octet-stream for voice, anything but HTML
+  for files); `Content-Length` and the streamed (decoded) body must stay under
+  the per-type cap in `outbound.URL_LIMITS`; the whole download has a 30 s
+  timeout.
+- Files over 5 MB are refused. QQ's chunked upload is not implemented;
   `QQHub.chunked_uploader` (a `ChunkedUploader`) is where it plugs in.
 - Group chats refuse `file` messages unless the tool option
   `allow_group_files: true` is set.
+
+Text longer than `max_chars` is split at paragraph, line, sentence or space
+boundaries into up to 3 messages (each uses a reply slot); longer text is
+refused. Every `NOT SENT` reason ends with the next step (send without
+`reply_to`, wait for the next message, rephrase, send another file …).
 
 `qq_send` options: `max_chars` (default 2000), `allow_group_files` (default
 false), `media_roots` (extra folders local media may come from; by default only
@@ -207,7 +219,7 @@ low-detail previews, so the creature looks before it sends. Backends:
 Guards: https only; previews are fetched only from globally routable addresses,
 must be `image/*` and at most 1 MB; `blocklist` (domains, subdomains included);
 `rate_limit_per_minute` (default 6, per creature and chat). The full image is
-sent by URL, so QQ downloads it.
+downloaded by kt-qqbot with the URL guards of `qq_send` and uploaded as bytes.
 
 ### Web tools in the example creature
 
@@ -271,7 +283,9 @@ no tokens). It is off by default.
 Kept in `~/.kohakuterrarium/qq-bot/data/<appid>.kvault` (KohakuVault):
 
 - each chat's message log (newest 2000 messages), type, handle, first-seen and
-  last-seen times;
+  last-seen times, and a group's name (looked up once with the undocumented
+  `GET /v2/groups/{id}/info` and again after a day; a refused lookup is logged
+  at debug and also retried only after a day);
 - sender aliases and the QQ names seen (at most 1000 stored per chat);
 - one cursor per feed per chat, so a resumed creature gets only what it has not
   seen;

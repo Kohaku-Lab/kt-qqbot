@@ -1,14 +1,18 @@
 """Outbound media: type inference, uploads per file_type, qq_send media rules."""
 
+import asyncio
+import base64
 import builtins
+import gzip
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from kohakuterrarium.core.trigger_manager import TriggerManager
 from kohakuterrarium.modules.tool.base import ToolContext
 
-from kt_qqbot import outbound
+from kt_qqbot import media, outbound
 from kt_qqbot.api import FILE_FILE, FILE_IMAGE, FILE_VIDEO, FILE_VOICE
 from kt_qqbot.errors import MediaError
 from kt_qqbot.outbound import MAX_SINGLE_UPLOAD_BYTES, MediaItem, infer_type
@@ -167,7 +171,8 @@ class TestQQSendMedia:
         ok = await send.execute({"media": "hi.silk"}, context=ctx)
         assert ok.success and fake_api.sent("/files")[-1]["file_type"] == 3
         refused = await send.execute({"media": "hi.wav"}, context=ctx)
-        assert refused.error == ("NOT SENT: voice needs silk; install kt-qqbot[voice]")
+        assert refused.error.startswith("NOT SENT: voice needs silk")
+        assert "send a .silk file, or say it as text" in refused.error
         monkeypatch.setattr(builtins, "__import__", real_import)
 
         async def fake_encode(data):
@@ -196,7 +201,7 @@ class TestQQSendMedia:
 
 
 def test_chunked_upload_seam_is_typed():
-    with pytest.raises(MediaError, match="chunked"):
+    with pytest.raises(MediaError, match="limited to .* Send a smaller file"):
         outbound.check_size(MediaItem("video", FILE_VIDEO, "v", data=b"\0" * 10), 5)
 
 
@@ -215,3 +220,187 @@ async def test_failed_upload_keeps_the_slot_and_reports_partial_send(
     assert hub.store.slots()["C1"]["used"] == 1, "a failed upload uses no slot"
     await feed.stop()
     await hub.close()
+
+
+# ── https URLs are downloaded by kt-qqbot ──────────────────────────
+
+
+async def _guarded(url):
+    parsed = httpx.URL(url)
+    if parsed.scheme != "https" or parsed.host.startswith("private"):
+        raise media.BlockedAddress(f"{parsed.host} resolves to a non-public address")
+
+
+class _NeverRead(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        raise AssertionError("the body must not be read")
+        yield b""
+
+
+def _client(handler):
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _ok(content=b"PNG", content_type="image/png", **headers):
+    return httpx.Response(
+        200, content=content, headers={"content-type": content_type, **headers}
+    )
+
+
+class TestUrlDownload:
+    @pytest.fixture(autouse=True)
+    def guard(self, monkeypatch):
+        monkeypatch.setattr(media, "check_public_url", _guarded)
+
+    async def test_downloads_bytes_and_infers_the_kind(self):
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            if request.url.path == "/clip":
+                return _ok(b"MP4", "video/mp4; codecs=avc1")
+            return _ok()
+
+        client = _client(handler)
+        item = await outbound.download(
+            "https://cdn.test/a%20b.png", None, client=client
+        )
+        assert (item.media_type, item.file_type, item.name) == ("image", 1, "a b.png")
+        assert item.data == b"PNG" and item.url is None
+        clip = await outbound.download("https://cdn.test/clip", None, client=client)
+        assert clip.media_type == "video" and clip.data == b"MP4"
+        assert seen == ["https://cdn.test/a%20b.png", "https://cdn.test/clip"]
+
+    async def test_redirects_are_followed_by_hand_and_rechecked(self):
+        hops = {
+            "/start": "https://cdn2.test/next",
+            "/next": "/final.png",
+            "/evil": "https://private.test/x.png",
+            "/plain": "http://cdn.test/x.png",
+            "/loop": "/loop",
+        }
+
+        def handler(request):
+            if request.url.path == "/nowhere.png":
+                return httpx.Response(302, content=b"PNG")
+            target = hops.get(request.url.path)
+            if target:
+                return httpx.Response(302, headers={"location": target})
+            return _ok()
+
+        client = _client(handler)
+        item = await outbound.download("https://cdn.test/start", "image", client=client)
+        assert item.name == "final.png" and item.data == b"PNG"
+        with pytest.raises(MediaError, match="non-public.*Send a public https link"):
+            await outbound.download("https://cdn.test/evil", "image", client=client)
+        with pytest.raises(MediaError, match="Send a public https link"):
+            await outbound.download("https://cdn.test/plain", "image", client=client)
+        with pytest.raises(MediaError, match="redirects too many times"):
+            await outbound.download("https://cdn.test/loop", "image", client=client)
+        with pytest.raises(MediaError, match="HTTP 302. Check it or send another"):
+            await outbound.download("https://cdn.test/nowhere.png", None, client=client)
+
+    async def test_headers_are_checked_before_the_body(self):
+        def handler(request):
+            match request.url.path:
+                case "/big.png":
+                    return httpx.Response(
+                        200,
+                        headers={
+                            "content-type": "image/png",
+                            "content-length": "9" * 9,
+                        },
+                        stream=_NeverRead(),
+                    )
+                case "/page.png":
+                    return httpx.Response(
+                        200, headers={"content-type": "text/html"}, stream=_NeverRead()
+                    )
+                case "/page":
+                    return httpx.Response(
+                        200, headers={"content-type": "text/html"}, stream=_NeverRead()
+                    )
+                case "/gone.png":
+                    return httpx.Response(404)
+            return _ok(b"bytes", "application/octet-stream")
+
+        client = _client(handler)
+        with pytest.raises(MediaError, match="limited to 5 MB here. Send a smaller"):
+            await outbound.download("https://cdn.test/big.png", None, client=client)
+        with pytest.raises(MediaError, match="text/html, not an image. Send a direct"):
+            await outbound.download("https://cdn.test/page.png", None, client=client)
+        with pytest.raises(MediaError, match="not a file"):
+            await outbound.download("https://cdn.test/page", None, client=client)
+        with pytest.raises(MediaError, match="not a video"):
+            await outbound.download("https://cdn.test/x.mp4", None, client=client)
+        with pytest.raises(MediaError, match="HTTP 404. Check it or send another"):
+            await outbound.download("https://cdn.test/gone.png", None, client=client)
+        blob = await outbound.download("https://cdn.test/blob", None, client=client)
+        assert blob.media_type == "file" and blob.data == b"bytes"
+        with pytest.raises(MediaError, match="must use https"):
+            await outbound.download("http://cdn.test/a.png", None, client=client)
+
+    async def test_streamed_size_is_capped_even_when_compressed(self):
+        bomb = gzip.compress(b"\0" * (MAX_SINGLE_UPLOAD_BYTES + 1))
+
+        def handler(request):
+            if request.url.path == "/bomb.png":
+                return _ok(bomb, "image/png", **{"content-encoding": "gzip"})
+            return _ok(b"\0" * 2048, "image/png")
+
+        client = _client(handler)
+        assert len(bomb) < MAX_SINGLE_UPLOAD_BYTES
+        with pytest.raises(MediaError, match="Send a smaller file"):
+            await outbound.download("https://cdn.test/bomb.png", None, client=client)
+        with pytest.raises(MediaError, match="limited to"):
+            await outbound.download(
+                "https://cdn.test/a.png", None, client=client, size_limit=1024
+            )
+        cap = outbound.URL_LIMITS["image"][0]
+        assert cap >= MAX_SINGLE_UPLOAD_BYTES and set(outbound.URL_LIMITS) == set(
+            outbound.MEDIA_TYPES
+        )
+
+    async def test_total_timeout_and_transport_errors(self):
+        async def slow(request):
+            await asyncio.sleep(5)
+            return _ok()
+
+        with pytest.raises(MediaError, match="took over 0 s. Send a smaller file"):
+            await outbound.download(
+                "https://cdn.test/a.png", None, client=_client(slow), timeout=0.05
+            )
+
+        def refuse(request):
+            raise httpx.ConnectError("refused")
+
+        with pytest.raises(MediaError, match="could not download a.png .ConnectError"):
+            await outbound.download(
+                "https://cdn.test/a.png", None, client=_client(refuse)
+            )
+
+    async def test_voice_urls_are_encoded_to_silk(self, monkeypatch):
+        async def fake_encode(data):
+            return SILK
+
+        monkeypatch.setattr(outbound, "_encode_silk", fake_encode)
+        client = _client(lambda r: _ok(b"ID3...", "audio/mpeg"))
+        voice = await outbound.download("https://cdn.test/hi.mp3", None, client=client)
+        assert voice.media_type == "voice" and voice.data == SILK
+
+    async def test_qq_send_uploads_downloaded_bytes(self, make_hub, fake_api, tmp_path):
+        hub = make_hub()
+        feed, ctx = await _setup(hub, tmp_path, EVENT_C2C, c2c_event("C1", "U1", "x"))
+        client = _client(
+            lambda r: _ok() if r.url.path == "/a.png" else httpx.Response(403)
+        )
+        send = QQSendTool(http=client)
+        ok = await send.execute({"media": "https://cdn.test/a.png"}, context=ctx)
+        assert ok.success, ok.error
+        upload = fake_api.sent("/files")[-1]
+        assert "url" not in upload and base64.b64decode(upload["file_data"]) == b"PNG"
+        bad = await send.execute({"media": "https://cdn.test/b.png"}, context=ctx)
+        assert bad.error.startswith("NOT SENT: the link answered HTTP 403.")
+        assert len(fake_api.sent("/files")) == 1
+        await feed.stop()
+        await hub.close()

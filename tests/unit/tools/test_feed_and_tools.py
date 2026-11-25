@@ -97,6 +97,172 @@ class TestHub:
         await hub.close()
 
 
+async def _names_done(hub):
+    for job in list(hub._name_jobs.values()):
+        await job
+
+
+def _quote_event(msg_id, member, content, ref, author, **extra):
+    return group_event(
+        msg_id,
+        "G1",
+        member,
+        content,
+        message_type=103,
+        message_scene={"ext": [f"ref_msg_idx={ref}"]},
+        msg_elements=[
+            {"author": author, "content": f"[消息内容] quoted {ref}\n[消息类型] 文本"}
+        ],
+        **extra,
+    )
+
+
+class TestHubChatDetails:
+    async def test_platform_quotes_link_to_stored_messages_and_the_bot(self, make_hub):
+        hub = make_hub()
+        hub.remember_identity({"id": "BOT"})
+        feed = await _feed(hub)
+        first = group_event(
+            "M1",
+            "G1",
+            "P1",
+            "火锅吧",
+            author={"member_openid": "P1", "username": "Kohaku"},
+            message_scene={"ext": ["msg_idx=REFIDX_1"]},
+        )
+        await hub.on_dispatch(EVENT_GROUP, first)
+        await hub.on_dispatch(
+            EVENT_GROUP,
+            _quote_event("M2", "P2", "好", "REFIDX_1", {"member_openid": "P1"}),
+        )
+        await hub.on_dispatch(
+            EVENT_GROUP,
+            _quote_event("M3", "P2", "那个", "REFIDX_OLD", {"member_openid": "P1"}),
+        )
+        await hub.on_dispatch(
+            EVENT_GROUP,
+            _quote_event("M4", "P3", "bot?", "REFIDX_B", {"member_openid": "BOT"}),
+        )
+        stored = [hub.store.get("group:G1", seq) for seq in (2, 3, 4)]
+        assert stored[0]["reply_seq"] == 1 and not stored[0].get("to_self")
+        assert "reply_seq" not in stored[1] and stored[1]["quote"]["alias"] == "Kohaku"
+        assert stored[2]["to_self"] is True and stored[2]["quote"]["self"] is True
+        text = (await _next(feed)).content
+        assert '↩m1 Kohaku "火锅吧": 好' in text
+        assert '↩Kohaku "quoted REFIDX_OLD": 那个' in text
+        assert '↩you "quoted REFIDX_B": bot?' in text
+        assert "(older message)" not in text
+        await feed.stop()
+        await hub.close()
+
+    async def test_group_name_is_looked_up_once_and_failures_rest(
+        self, make_hub, fake_api, monkeypatch, tmp_path
+    ):
+        hub = make_hub()
+        fake_api.group_names["G1"] = "Cat Lovers"
+        feed = await _feed(hub)
+
+        def lookups(group):
+            return [
+                p for _, p, _ in fake_api.requests if p == f"/v2/groups/{group}/info"
+            ]
+
+        await hub.on_dispatch(EVENT_GROUP, group_event("A1", "G1", "P1", "hi"))
+        await _names_done(hub)
+        assert hub.store.conv_name("group:G1") == "Cat Lovers"
+        event = await _next(feed)
+        assert '<qq_update chat="g_g1" name="Cat Lovers" type="group">' in event.content
+        await hub.on_dispatch(EVENT_GROUP, group_event("A2", "G1", "P1", "again"))
+        await _names_done(hub)
+        assert len(lookups("G1")) == 1, "known names are not fetched again"
+        history = await QQHistoryTool().execute(
+            {"chat": "g_g1"}, context=_context(tmp_path, feed)
+        )
+        assert '<qq_history chat="g_g1" name="Cat Lovers"' in history.output
+        await hub.on_dispatch(EVENT_C2C, c2c_event("Z1", "U9", "dm"))
+        await _next(feed)
+        unsure = await QQSendTool().execute(
+            {"message": "x"}, context=_context(tmp_path, feed)
+        )
+        assert "g_g1 (Cat Lovers)" in unsure.error and "u_u9" in unsure.error
+
+        await hub.on_dispatch(EVENT_GROUP, group_event("B1", "G2", "P1", "x"))
+        await hub.on_dispatch(EVENT_GROUP, group_event("B2", "G2", "P1", "y"))
+        await _names_done(hub)
+        await hub.on_dispatch(EVENT_GROUP, group_event("B3", "G2", "P1", "z"))
+        await _names_done(hub)
+        assert len(lookups("G2")) == 1, "a refused lookup is not retried at once"
+        meta = hub.store.conv_meta("group:G2")
+        assert meta["name_failed_at"] and hub.store.conv_name("group:G2") == ""
+        event = await _next(feed)
+        assert '<qq_update chat="g_g2" type="group">' in event.content
+
+        day_ago = time.time() - 25 * 3600
+        hub.store.update_conv("group:G2", name_checked_at=day_ago)
+        fake_api.group_names["G2"] = "Dog Lovers"
+        await hub.on_dispatch(EVENT_GROUP, group_event("B4", "G2", "P1", "w"))
+        await _names_done(hub)
+        assert (
+            len(lookups("G2")) == 2 and hub.store.conv_name("group:G2") == "Dog Lovers"
+        )
+        assert hub.store.conv_meta("group:G2")["name_failed_at"] is None
+
+        async def broken(openid):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(hub.api, "group_info", broken)
+        assert await hub.ingest(_record("group:G3", "C1")) == 1
+        await _names_done(hub)
+        assert hub.store.conv_meta("group:G3")["name_failed_at"]
+        await hub.on_dispatch(EVENT_C2C, c2c_event("D1", "U1", "private"))
+        await _names_done(hub)
+        assert "name_checked_at" not in hub.store.conv_meta("c2c:U1")
+        assert await hub.refresh_group_name("c2c:U1") == ""
+        hub.unbound = True
+        await hub.ingest(_record("group:G4", "E1"))
+        assert "name_checked_at" not in hub.store.conv_meta("group:G4")
+        await feed.stop()
+        await hub.close()
+
+    async def test_same_named_senders_are_told_apart(self, make_hub, fake_api):
+        hub = make_hub()
+        feed = await _feed(hub)
+        for msg_id, member in (("A", "P1AA"), ("B", "P2BB")):
+            await hub.on_dispatch(
+                EVENT_GROUP,
+                group_event(
+                    msg_id,
+                    "G1",
+                    member,
+                    f"hi from {member}",
+                    author={"member_openid": member, "username": "Kohaku"},
+                ),
+            )
+        text = (await _next(feed)).content
+        assert "Kohaku#p1aa: hi from P1AA" in text
+        assert "Kohaku#p2bb: hi from P2BB" in text
+        result = await hub.send(
+            "group:G1", "@Kohaku#p2bb yes", mention_format="markdown"
+        )
+        assert result.sent
+        content = fake_api.sent()[-1]["markdown"]["content"]
+        assert content == '<qqbot-at-user id="P2BB" /> yes'
+        await feed.stop()
+        await hub.close()
+
+
+def _record(cid, msg_id):
+    return {
+        "conv": cid,
+        "kind": cid.partition(":")[0],
+        "msg_id": msg_id,
+        "author": "P",
+        "content": "x",
+        "ts": time.time(),
+        "self": False,
+    }
+
+
 class TestFeedTrigger:
     async def test_incremental_delivery_with_backfill_and_filters(self, make_hub):
         hub = make_hub()
@@ -265,9 +431,59 @@ class TestTools:
         assert "bad reply_to" in bad_tag.error
         fake_api.fail_send = "banned word"
         failed = await send.execute({"message": "x"}, context=ctx)
-        assert failed.output == "NOT SENT: banned word" and failed.exit_code == 1
-        too_long = await send.execute({"message": "x" * 5000}, context=ctx)
-        assert "longer than" in too_long.error
+        assert failed.output.startswith("NOT SENT: QQ refused the message")
+        assert "banned word" in failed.output and "Rephrase" in failed.output
+        assert failed.exit_code == 1
+        too_long = await send.execute({"message": "x" * 6001}, context=ctx)
+        assert "longer than 3 chat messages" in too_long.error
+        assert "Shorten it" in too_long.error
+        await feed.stop()
+        await hub.close()
+
+    async def test_send_errors_name_the_next_step(self, make_hub, fake_api, tmp_path):
+        hub = make_hub()
+        send = QQSendTool(max_chars=10)
+        lonely = _context(tmp_path)
+        no_feed = await send.execute({"message": "hi"}, context=lonely)
+        assert no_feed.error.endswith("Start one with qq_watch, then wait for chat.")
+        feed = await _feed(hub)
+        ctx = _context(tmp_path, feed)
+        early = await send.execute({"message": "hi"}, context=ctx)
+        assert early.error.endswith("Wait for chat to arrive, then name it with `to`.")
+        await hub.on_dispatch(EVENT_GROUP, group_event("G-1", "G1", "P1", "hi"))
+        await _next(feed)
+        empty = await send.execute({"message": " "}, context=ctx)
+        assert empty.error.endswith("Give message text, media, or both.")
+        bad = await send.execute({"message": "x", "reply_to": "?"}, context=ctx)
+        assert bad.error.endswith("Use a tag like m41, or leave reply_to out.")
+        gone = await send.execute({"message": "x", "reply_to": "m50"}, context=ctx)
+        assert gone.output == (
+            "NOT SENT: m50 is not in this chat. Send again without reply_to."
+        )
+        unknown = await send.execute({"message": "x", "to": "g_zz"}, context=ctx)
+        assert unknown.error.endswith(
+            'Use the chat="…" handle from a <qq_update> block.'
+        )
+        no_att = await send.execute({"media": "m1.3"}, context=ctx)
+        assert no_att.error.endswith("Use a tag the feed shows, such as [image m12.1].")
+        lost = await send.execute({"media": "m99.1"}, context=ctx)
+        assert lost.error.endswith("Ask the sender to post it again.")
+        sticker = await send.execute({"media": "sticker:none.png"}, context=ctx)
+        assert "Search with qq_sticker" in sticker.error
+        (tmp_path / "r.pdf").write_bytes(b"pdf")
+        group_file = await send.execute({"media": "r.pdf"}, context=ctx)
+        assert group_file.error.endswith("or as an image or video.")
+        split = await send.execute(
+            {"message": "一二三四五。六七八九十。甲乙丙。"}, context=ctx
+        )
+        assert split.output == "Sent as m2, m3"
+        assert [b["content"] for b in fake_api.sent()] == [
+            "一二三四五。",
+            "六七八九十。甲乙丙。",
+        ]
+        too_long = await send.execute({"message": "x" * 31}, context=ctx)
+        assert "31 characters, longer than 3 chat messages of 10" in too_long.error
+        assert len(fake_api.sent()) == 2
         await feed.stop()
         await hub.close()
 

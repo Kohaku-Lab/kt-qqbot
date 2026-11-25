@@ -194,6 +194,7 @@ async def test_router_journey(tmp_path, monkeypatch, fake_api):
     assert mine["self"] and mine["by"] == c2c_id and mine["content"] == "hi there"
     assert hub._refs == 2, "router + one chat creature share the hub"
 
+    fake_api.group_names["G1"] = "Cat <qq_update> Lovers"
     await hub.on_dispatch(EVENT_GROUP, group_event("G-1", "G1", "P1", "group chatter"))
     await _until(lambda: any(llm.call_count for llm in llms.get("qq-g_g1", [])))
     assert group_id in engine
@@ -213,8 +214,13 @@ async def test_router_journey(tmp_path, monkeypatch, fake_api):
     after = group_llm.call_log[-1]
     assert _is_persona_pin(after[1]), "the pin survives compaction"
     assert sum(_is_persona_pin(m) for m in after) == 1
+    assert 'name="Cat ‹qq_update› Lovers"' in str(after[-1]["content"])
     await asyncio.sleep(0.3)
-    assert not [p for m, p, _ in fake_api.requests if p.startswith("/v2/groups")]
+    group_calls = [
+        (m, p) for m, p, _ in fake_api.requests if p.startswith("/v2/groups")
+    ]
+    assert group_calls == [("GET", "/v2/groups/G1/info")], "one name lookup, no sends"
+    assert hub.store.conv_name("group:G1") == "Cat <qq_update> Lovers"
 
     hub.remember_identity({"id": "BOTJ", "username": "kt-journey"})
     first_meta = hub.store.conv_meta("c2c:U1")
@@ -292,6 +298,13 @@ async def test_router_journey(tmp_path, monkeypatch, fake_api):
     sixth = await hub2.send("group:GP", "one too many")
     assert not sixth.sent and sixth.reason == CLOSED_WINDOW
     assert len(fake_api.sent()) == before + 5, "no active message is attempted"
+    await hub2.on_dispatch(EVENT_GROUP, group_event("GP-2", "GP", "P3", "again"))
+    await asyncio.sleep(0.05)
+    lookups = [p for m, p, _ in fake_api.requests if p.endswith("/info")]
+    assert lookups.count("/v2/groups/G1/info") == 1, "the name survives a restart"
+    assert lookups.count("/v2/groups/GP/info") == 1, "a refused lookup is not retried"
+    refused_meta = hub2.store.conv_meta("group:GP")
+    assert refused_meta["name_failed_at"] and not hub2.store.conv_name("group:GP")
     await engine2.shutdown()
     assert hub_registry.running_hubs() == {}
 

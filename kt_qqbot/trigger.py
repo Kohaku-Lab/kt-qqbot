@@ -411,7 +411,9 @@ class QQFeedTrigger(BaseTrigger):
             if not messages:
                 continue
             meta = hub.store.conv_meta(cid) or {}
-            attrs = chat_attrs(meta.get("handle", cid), meta.get("kind", ""))
+            attrs = chat_attrs(
+                meta.get("handle", cid), meta.get("kind", ""), meta.get("name", "")
+            )
             old: list[dict] = []
             if first_time and self.unseen_history == "backfill":
                 old = [m for m in messages if (m.get("recv") or 0) < self._started]
@@ -463,16 +465,45 @@ class QQFeedTrigger(BaseTrigger):
         if limit <= 0:
             return [omitted_note(len(messages))] if messages else []
         shown = messages[-limit:]
-        lines = [self._line(m) for m in shown]
+        labels = self._labels(shown)
+        lines = [self._line(m, labels) for m in shown]
         if len(messages) > len(shown):
             lines.insert(0, omitted_note(len(messages) - len(shown)))
         return lines
 
-    def _line(self, message: dict) -> str:
+    def _labels(self, messages: list[dict]) -> dict[str, dict[str, str]]:
+        """Return the ``alias#id`` labels of each chat in ``messages``."""
+        if self.hub is None:
+            return {}
+        return {
+            cid: self.hub.store.labels(cid) for cid in {m["conv"] for m in messages}
+        }
+
+    @staticmethod
+    def _labelled(message: dict, labels: dict[str, str]) -> dict:
+        """Return ``message`` with its alias replaced by its ``alias#id`` label, if shared."""
+        alias = message.get("alias")
+        label = labels.get(str(message.get("author") or ""))
+        if message.get("self") or not alias or not label:
+            return message
+        if not label.startswith(f"{alias}#"):
+            return message
+        return dict(message, alias=label)
+
+    def _line(self, message: dict, labels: dict[str, dict[str, str]]) -> str:
+        chat = labels.get(message["conv"], {})
         quoted = None
         if message.get("reply_seq") and self.hub is not None:
             quoted = self.hub.store.get(message["conv"], int(message["reply_seq"]))
-        return render_line(message, quoted)
+            if quoted is not None:
+                quoted = self._labelled(quoted, chat)
+        quote = message.get("quote")
+        if quoted is None and isinstance(quote, dict) and quote.get("author"):
+            fake = {"author": quote["author"], "alias": quote.get("alias")}
+            alias = self._labelled(fake, chat).get("alias")
+            if alias != quote.get("alias"):
+                message = dict(message, quote=dict(quote, alias=alias))
+        return render_line(self._labelled(message, chat), quoted)
 
     def render_held(
         self, cid: str, messages: list[dict], name: str = "qq_update"
@@ -480,7 +511,9 @@ class QQFeedTrigger(BaseTrigger):
         """Render messages outside a delivery (held sends, history) as one block."""
         hub = self.hub
         meta = (hub.store.conv_meta(cid) if hub else None) or {}
-        attrs = chat_attrs(meta.get("handle", cid), meta.get("kind", ""))
+        attrs = chat_attrs(
+            meta.get("handle", cid), meta.get("kind", ""), meta.get("name", "")
+        )
         return render_block(name, attrs, self._capped(messages, self.max_delivery))
 
 

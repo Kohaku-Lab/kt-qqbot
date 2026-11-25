@@ -17,6 +17,8 @@ from kt_qqbot.records import MENTION_TAG
 
 DEFAULT_RETENTION = 2000
 DEFAULT_MAX_ALIASES = 1000
+QUOTE_SCAN = 200
+ID_SUFFIX_CHARS = 4
 HANDLE_PREFIX = {"c2c": "u_", "group": "g_"}
 
 
@@ -90,6 +92,18 @@ class ChatStore:
     def conv_meta(self, cid: str) -> dict | None:
         """Return a conversation's metadata, or None if unseen."""
         return self._vault.get(f"conv:{cid}")
+
+    def update_conv(self, cid: str, **fields: Any) -> None:
+        """Merge ``fields`` into a known conversation's metadata."""
+        with self._lock:
+            meta = self.conv_meta(cid)
+            if meta is not None:
+                self._vault[f"conv:{cid}"] = dict(meta, **fields)
+
+    def conv_name(self, cid: str) -> str:
+        """Return the platform name of a conversation (a group name), or ``""``."""
+        meta = self.conv_meta(cid) or {}
+        return str(meta.get("name") or "")
 
     def conversations(self) -> list[str]:
         """Return every known conversation key."""
@@ -198,6 +212,15 @@ class ChatStore:
                 stored["mention"] = True
                 self._vault[_seq_key(*found)] = stored
 
+    def find_idx(self, cid: str, msg_idx: str) -> int | None:
+        """Return the seq of a recent message in ``cid`` with platform quote index ``msg_idx``."""
+        if not msg_idx:
+            return None
+        for message in reversed(self.recent(cid, QUOTE_SCAN)):
+            if message.get("msg_idx") == msg_idx:
+                return int(message["seq"])
+        return None
+
     def find(self, msg_id: str) -> tuple[str, int] | None:
         """Return ``(conv, seq)`` of a platform message id."""
         found = self._vault.get(f"mid:{msg_id}")
@@ -231,13 +254,49 @@ class ChatStore:
         self._store_alias(cid, key, alias, new=True)
         return alias
 
-    def members(self, cid: str) -> dict[str, str]:
-        """Map each display alias in ``cid`` to its sender id; shared aliases are left out."""
+    def alias_of(self, cid: str, author: str) -> str | None:
+        """Return the stored alias of one sender, without creating one."""
+        return self._vault.get(f"alias:{cid}:{author}") if author else None
+
+    def _owners(self, cid: str) -> dict[str, list[str]]:
         prefix = f"alias:{cid}:"
         owners: dict[str, list[str]] = {}
         for key, alias in self._vault.items(prefix=prefix):
             owners.setdefault(alias, []).append(key.decode()[len(prefix) :])
-        return {alias: ids[0] for alias, ids in owners.items() if len(ids) == 1}
+        return owners
+
+    def labels(self, cid: str) -> dict[str, str]:
+        """Map each sender whose alias another sender in ``cid`` shares to ``alias#id``.
+
+        The id suffix is the shortest prefix (at least 4 characters) of the
+        sender id that tells the senders sharing that alias apart.
+        """
+        found: dict[str, str] = {}
+        for alias, ids in self._owners(cid).items():
+            if len(ids) < 2:
+                continue
+            cleaned = {author: self._clean(author) for author in ids}
+            size = ID_SUFFIX_CHARS
+            longest = max(len(c) for c in cleaned.values())
+            while (
+                len({c[:size] for c in cleaned.values()}) < len(cleaned)
+                and size < longest
+            ):
+                size += 2
+            for author, clean in cleaned.items():
+                found[author] = f"{alias}#{clean[:size]}"
+        return found
+
+    def members(self, cid: str) -> dict[str, str]:
+        """Map each display alias in ``cid`` to its sender id.
+
+        A shared alias maps only in its ``alias#id`` form from :meth:`labels`.
+        """
+        members = {
+            alias: ids[0] for alias, ids in self._owners(cid).items() if len(ids) == 1
+        }
+        members.update({label: author for author, label in self.labels(cid).items()})
+        return members
 
     @staticmethod
     def _clean(author: str) -> str:

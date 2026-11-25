@@ -170,7 +170,7 @@ async def test_h3_non_admin_engine_refuses_admin_engine_allows(engine_env, tmp_p
         (QQWatchTool(), {}),
     ):
         result = await tool.execute(args, context=ctx)
-        assert result.error == access.ADMIN_ONLY, tool.tool_name
+        assert result.error.startswith(access.ADMIN_ONLY), tool.tool_name
     router = QQRouterPlugin()
     plugin_ctx = PluginContext(agent_name="tools-only", _host_agent=creature.agent)
     await router.on_load(plugin_ctx)
