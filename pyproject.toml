@@ -37,4 +37,7 @@ select = ["F401", "F841", "PLW1514"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-markers = ["live: talks to the real QQ platform (set KT_QQBOT_LIVE=1)"]
+markers = [
+    "live: talks to the real QQ platform (set KT_QQBOT_LIVE=1)",
+    "sandbox_live: reads files from a real kt-sandbox sandbox in Docker (set KT_QQBOT_SANDBOX_LIVE=1)",
+]

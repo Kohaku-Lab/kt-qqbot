@@ -19,7 +19,7 @@ from kohakuterrarium.modules.tool.base import (
 from kohakuterrarium.modules.trigger.callable import CallableTriggerTool
 from kohakuterrarium.utils.logging import get_logger
 
-from kt_qqbot import access
+from kt_qqbot import access, sandbox_media
 from kt_qqbot.errors import MediaError
 from kt_qqbot.handles import SEARCHES, owner_of, parse_chat_handle
 from kt_qqbot.media import cached_attachment
@@ -347,7 +347,12 @@ class QQSendTool(BaseTool):
         context: ToolContext | None,
         limit: int | None,
     ) -> MediaItem | None:
-        """Resolve ``persona`` / ``sticker:`` / ``img:`` / ``m<seq>.<n>`` handles; None for paths."""
+        """Resolve ``persona`` / ``sticker:`` / ``img:`` / ``sandbox:`` / ``m<seq>.<n>`` handles.
+
+        Returns None for local paths and https URLs.
+        """
+        if sandbox_media.is_sandbox_ref(spec):
+            return await sandbox_media.load(spec, media_type, limit)
         if spec == "persona":
             folder = self.character_directory or root_dir()
             path, _ = find_persona(folder)
