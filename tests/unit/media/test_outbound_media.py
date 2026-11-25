@@ -144,6 +144,11 @@ class TestQQSendMedia:
             {"media": "https://a.test/x", "media_type": "sticker"}, context=ctx
         )
         assert "media_type" in bad_type.error
+        for handle in ("persona", "sticker:wave", "img:1"):
+            refused = await send.execute(
+                {"media": handle, "media_type": "sticker"}, context=ctx
+            )
+            assert "unknown media_type 'sticker'" in refused.error, handle
         big = tmp_path / "big.mp4"
         big.write_bytes(b"\0" * (MAX_SINGLE_UPLOAD_BYTES + 1))
         too_big = await send.execute({"media": "big.mp4"}, context=ctx)

@@ -303,6 +303,10 @@ class QQSendTool(BaseTool):
         feed: QQFeedTrigger,
         context: ToolContext | None,
     ) -> list[MediaItem]:
+        if media_type is not None and media_type not in MEDIA_TYPES:
+            raise MediaError(
+                f"unknown media_type {media_type!r}; use image, video, voice or file"
+            )
         base = context.working_dir if context is not None else Path.cwd()
         roots = [Path(base).resolve(), *self.media_roots]
 
